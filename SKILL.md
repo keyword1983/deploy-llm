@@ -118,6 +118,10 @@ afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie
 
 記錄 `ENGINE_ID`、`ENGINE_NAME`、`ENGINE_VERSION`、`CHART_REF_NAME`。
 
+> 💡 **vLLM Engine 映像檔說明 (Image Description)：**
+> - vLLM Engine 內使用的 Container Image 預設為 NVIDIA NGC 的 vLLM 映像檔 (例如 `nvcr.io/nvidia/vllm`)。
+> - 在選擇與排序 Engine 時，`find_engine.py` 會自動偵測並優先選擇名稱或 ID 包含 `nvidia` 的 NGC vLLM 引擎 (其版本號會被模擬為 `99.0.0` 進行優先排序)，以確保獲得針對 Blackwell 等新一代 GPU 的最佳化效能與相容性支援。
+
 ```
 [2/6] ✅ Engine：{ENGINE_NAME}（vLLM {ENGINE_VERSION}）
 ```
