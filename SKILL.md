@@ -21,29 +21,44 @@ afsbox 平台使用 **Keycloak OIDC** 認證。執行前先確認以下變數，
 
 ### 取得 Access Token
 
-afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie 中，
-`access_token` 只存在瀏覽器 JS memory，Claude Code 無法直接存取。
-需要先從瀏覽器取得 `refresh_token`，再用腳本換取 `access_token`。
+有三種方式可以取得 `ACCESS_TOKEN`：
 
-**Step 1：從瀏覽器取得 refresh_token**
-
-已登入 Portal 後：
+#### 方式 1：自動腳本取得（優先，推薦）
+若執行環境有 `kubectl` 權限，`get_token.py` 會自動查詢 `afsbox-system` 的 Secret 以獲取 `client_id` (`afsbox-platform`) 與 `client_secret`，並透過 Keycloak Service IP 取得 Token。直接執行即可：
+```bash
+python3 .gemini/skills/deploy-llm/scripts/get_token.py
 ```
-DevTools（F12）→ Application → Cookies → 找 "refresh_token" → 複製 Value
+*註：若此自動偵測成功，腳本會直接輸出 `ACCESS_TOKEN`。*
+
+#### 方式 2：手動 Curl 指令取得
+若能直接存取叢集網路，可透過 Keycloak Token 端點（例如 `10.43.242.207`）以 Resource Owner Password Credentials 方式直接獲取：
+```bash
+curl -s -X POST "http://10.43.242.207/realms/afsbox/protocol/openid-connect/token" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "client_id=afsbox-platform" \
+      -d "client_secret=PsumgknUP~UIRbCEFAruh1YzFdZepCeZ" \
+      -d "grant_type=password" \
+      -d "username=admin@asus.com" \
+      -d "password=admin" \
+      -d "scope=openid" | jq -r .access_token
 ```
 
-**Step 2：用腳本換取 access_token**
+#### 方式 3：從瀏覽器 Cookie 換取（備用）
+afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie 中，可透過複製後以腳本換取：
+1. **取得 refresh_token**：登入 Portal 後，打開 DevTools (F12) → Application → Cookies → 找 `refresh_token` → 複製其 Value。
+2. **換取 token**：
+   ```bash
+   python3 .gemini/skills/deploy-llm/scripts/get_token.py "{API_BASE_URL}" "{REFRESH_TOKEN}"
+   ```
 
-!`python3 .gemini/skills/deploy-llm/scripts/get_token.py "{API_BASE_URL}" "{REFRESH_TOKEN}"`
-
-輸出即為 `ACCESS_TOKEN`，記錄後供所有後續步驟使用。
+記錄取得的 `ACCESS_TOKEN`，供後續步驟使用。
 
 > ⚠️ **Token 有效期：**
 > - `access_token`：數分鐘到 1 小時（依 Keycloak 設定）
 > - `refresh_token`：數小時到數天（通常足夠完成整個部署流程）
 >
-> 若中途 API 回傳 `401`，重新執行 Step 2 換新 `access_token` 即可。
-> 若 `get_token.py` 也回傳 `401`，代表 `refresh_token` 過期，需重新登入 Portal。
+> 若中途 API 回傳 `401`，重新執行上述方法換新 `access_token` 即可。
+
 
 ---
 
