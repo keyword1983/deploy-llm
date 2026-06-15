@@ -67,7 +67,7 @@ def detect_image_source() -> str:
         base_image = "nvcr.io/nvidia/vllm:26.02-py3"
     else:
         # Traditional x86 + non-Blackwell setup -> use official public vLLM image
-        base_image = "vllm/vllm-openai:v0.7.3"
+        base_image = "vllm/vllm-openai:latest"
 
     # 2. Try to discover local private registry from existing controllers (offline mode)
     try:
@@ -81,7 +81,7 @@ def detect_image_source() -> str:
                 if is_arm or is_blackwell:
                     return f"{parts[0]}/nvidia/vllm:26.02-py3"
                 else:
-                    return f"{parts[0]}/afsbox/vllm-openai:v0.7.3"
+                    return f"{parts[0]}/afsbox/vllm-openai:latest"
     except Exception:
         pass
 
