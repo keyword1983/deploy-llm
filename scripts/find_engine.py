@@ -43,14 +43,14 @@ def version_str(t: tuple) -> str:
 
 
 def detect_image_source() -> str:
-    # Track 1: Outbound TCP socket test to Docker Hub
+    # Track 1: Outbound TCP socket test to Nvidia NGC
     import socket
     try:
         socket.setdefaulttimeout(3)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("registry-1.docker.io", 443))
+        s.connect(("nvcr.io", 443))
         s.close()
-        return "vllm/vllm-openai:v0.6.3"
+        return "nvcr.io/nvidia/vllm:26.02-py3"
     except Exception:
         pass
 
@@ -64,12 +64,12 @@ def detect_image_source() -> str:
             parts = image_path.split('/')
             if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
                 # Reconstruct image path with local private registry prefix
-                return f"{parts[0]}/afsbox/vllm-openai:v0.6.3"
+                return f"{parts[0]}/nvidia/vllm:26.02-py3"
     except Exception:
         pass
 
-    # Fallback to public
-    return "vllm/vllm-openai:v0.6.3"
+    # Fallback to Nvidia NGC
+    return "nvcr.io/nvidia/vllm:26.02-py3"
 
 
 def try_bootstrap_engine() -> bool:
