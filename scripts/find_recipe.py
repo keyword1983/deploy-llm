@@ -29,6 +29,8 @@ import sys
 import json
 import urllib.request
 import urllib.error
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 RECIPES_BASE = 'https://recipes.vllm.ai'
 

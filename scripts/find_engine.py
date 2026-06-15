@@ -19,6 +19,8 @@ import json
 import re
 import urllib.request
 import urllib.error
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 
 def parse_version(engine: dict) -> tuple:
