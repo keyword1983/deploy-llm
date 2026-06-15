@@ -200,12 +200,17 @@ def try_bootstrap_preset(req_vram: float, vram_map: dict) -> bool:
         if per_gpu_bytes * count * 0.9 < req_vram:
             continue
             
-        # We keep host CPU and memory requirements modest since VRAM is the primary bottleneck.
-        # This avoids scheduling/oversubscription issues and fits physical constraints (e.g. 18.6 GiB host RAM).
-        preset_cpu_req = 4
-        preset_cpu_lim = 8
-        preset_mem_req = "12Gi"
-        preset_mem_lim = "16Gi"
+        # Scale host CPU and memory requests/limits dynamically based on the ratio of requested GPUs to the node's total GPUs.
+        # This keeps allocations proportional to the node's physical capabilities (e.g. modest on 18.6 GiB RAM nodes, but higher on 512 GiB RAM nodes).
+        gpu_ratio = count / hw["gpu_count"]
+        
+        cpu_alloc = int(hw.get("cpu_limit", "8"))
+        mem_alloc_gb = parse_vram_bytes(hw.get("mem_limit", "16Gi")) / (1024**3)
+        
+        preset_cpu_req = max(2, int(cpu_alloc * gpu_ratio * 0.5))
+        preset_cpu_lim = max(4, int(cpu_alloc * gpu_ratio))
+        preset_mem_req = f"{max(8, int(mem_alloc_gb * gpu_ratio * 0.5))}Gi"
+        preset_mem_lim = f"{max(16, int(mem_alloc_gb * gpu_ratio))}Gi"
 
         preset_name = f"auto-preset-{hw['gpu_product'].lower()}-{count}x"
         
