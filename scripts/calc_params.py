@@ -283,6 +283,28 @@ def main():
 
     max_num_seqs = max_num_seqs_for_slo(slo)
 
+    # Calculate vGPU scale factor if Hami is enabled
+    vgpu_scale = 1.0
+    try:
+        import subprocess
+        # Detect physical GPUs
+        proc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True, text=True, timeout=5, check=True
+        )
+        physical_gpus = max(1, len(proc.stdout.strip().split('\n')))
+        
+        # Detect allocatable GPUs in K8s
+        cmd_node = ["kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"]
+        node_name = subprocess.run(cmd_node, capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        cmd_alloc = ["kubectl", "get", "node", node_name, "-o", "jsonpath={.status.allocatable.nvidia\\.com/gpu}"]
+        k8s_gpus = int(subprocess.run(cmd_alloc, capture_output=True, text=True, timeout=5, check=True).stdout.strip())
+        
+        if k8s_gpus > physical_gpus:
+            vgpu_scale = physical_gpus / k8s_gpus
+    except Exception:
+        pass
+
     # Evaluate each enabled preset
     presets = presets_data.get('resourcepresets', [])
     results = []
@@ -295,7 +317,9 @@ def main():
         if per_gpu == 0:
             continue  # Unknown GPU, skip
 
-        total_vram = per_gpu * gpu_count * 0.9
+        # Apply vGPU scale factor to get true VRAM allocatable per vGPU unit
+        actual_per_gpu = per_gpu * vgpu_scale
+        total_vram = actual_per_gpu * gpu_count * 0.9
         can_fit    = total_vram >= req_vram
         avail_kv   = max(total_vram - req_vram, 0)
 
@@ -344,7 +368,9 @@ def main():
                     if per_gpu == 0:
                         continue
                         
-                    total_vram = per_gpu * gpu_count * 0.9
+                    # Apply vGPU scale factor to get true VRAM allocatable per vGPU unit
+                    actual_per_gpu = per_gpu * vgpu_scale
+                    total_vram = actual_per_gpu * gpu_count * 0.9
                     can_fit    = total_vram >= req_vram
                     avail_kv   = max(total_vram - req_vram, 0)
 
