@@ -330,7 +330,9 @@ def main():
         avail_kv   = max(total_vram - req_vram, 0)
 
         if kv_per_token > 0:
-            eff_ctx = min(int(avail_kv / (kv_per_token * max_num_seqs)), context_len)
+            # Assume a concurrency factor of 2 at maximum length for KV cache sizing,
+            # allowing max_model_len to scale up to the model's native limit while vLLM handles dynamic allocation.
+            eff_ctx = min(int(avail_kv / (kv_per_token * 2)), context_len)
         else:
             eff_ctx = context_len
 
@@ -381,7 +383,8 @@ def main():
                     avail_kv   = max(total_vram - req_vram, 0)
 
                     if kv_per_token > 0:
-                        eff_ctx = min(int(avail_kv / (kv_per_token * max_num_seqs)), context_len)
+                        # Assume a concurrency factor of 2 at maximum length for KV cache sizing
+                        eff_ctx = min(int(avail_kv / (kv_per_token * 2)), context_len)
                     else:
                         eff_ctx = context_len
 
@@ -440,10 +443,9 @@ def main():
     tp_size = min(tp_size, physical_gpus)
     tp_size = max(tp_size, 1)
 
-    # max_model_len cap by SLO
-    ctx_cap = {'latency': 8192, 'throughput': 32768}.get(slo, 16384)
-    max_model_len = min(best['effective_ctx'], ctx_cap)
-    max_model_len = max(max_model_len, 2048)  # minimum reasonable context
+    # We set max_model_len to the calculated effective_ctx (capped by model's native context_len),
+    # ensuring we maximize the model's native context length as requested, with a minimum fallback of 2048.
+    max_model_len = max(best['effective_ctx'], 2048)
 
     # Determine dtype
     family = best['family']
