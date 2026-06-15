@@ -43,19 +43,33 @@ def version_str(t: tuple) -> str:
 
 
 def detect_image_source() -> str:
-    # Track 1: Outbound TCP socket test to Nvidia NGC
-    import socket
+    # 1. Detect hardware characteristics
+    import platform
+    import subprocess
+    
+    is_arm = platform.machine().lower() in ["aarch64", "arm64"]
+    is_blackwell = False
+    
     try:
-        socket.setdefaulttimeout(3)
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect(("nvcr.io", 443))
-        s.close()
-        return "nvcr.io/nvidia/vllm:26.02-py3"
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode == 0:
+            gpu_name = proc.stdout.strip().lower()
+            if any(x in gpu_name for x in ["gb10", "gb200", "b200", "blackwell"]):
+                is_blackwell = True
     except Exception:
         pass
 
-    # Track 2: Try to discover local private registry from existing controllers
-    import subprocess
+    # Determine base image based on hardware configuration
+    if is_arm or is_blackwell:
+        base_image = "nvcr.io/nvidia/vllm:26.02-py3"
+    else:
+        # Traditional x86 + non-Blackwell setup -> use official public vLLM image
+        base_image = "vllm/vllm-openai:v0.6.3"
+
+    # 2. Try to discover local private registry from existing controllers (offline mode)
     try:
         cmd = ["kubectl", "get", "deployment", "afsbox-controller", "-n", "afsbox-system", "-o", "jsonpath={.spec.template.spec.containers[0].image}"]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
@@ -64,12 +78,15 @@ def detect_image_source() -> str:
             parts = image_path.split('/')
             if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
                 # Reconstruct image path with local private registry prefix
-                return f"{parts[0]}/nvidia/vllm:26.02-py3"
+                if is_arm or is_blackwell:
+                    return f"{parts[0]}/nvidia/vllm:26.02-py3"
+                else:
+                    return f"{parts[0]}/afsbox/vllm-openai:v0.6.3"
     except Exception:
         pass
 
-    # Fallback to Nvidia NGC
-    return "nvcr.io/nvidia/vllm:26.02-py3"
+    # Fallback to public registry URL
+    return base_image
 
 
 def try_bootstrap_engine() -> bool:
