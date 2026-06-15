@@ -386,12 +386,26 @@ def main():
     best = feasible[0]
     per_gpu = best['per_gpu_vram_bytes']
 
+    # Get physical GPU count to handle vGPU/Hami sharing environments
+    import subprocess
+    physical_gpus = 1
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True, text=True, timeout=5, check=True
+        )
+        physical_gpus = len(proc.stdout.strip().split('\n'))
+    except Exception:
+        pass
+
     # Calculate tensor parallel size.
     # 1. We match tp_size to the preset's gpu_count to maximize resource utilization.
     # 2. We align to the nearest lower power of 2 for vLLM compatibility.
+    # 3. TP size CANNOT exceed physical GPUs (vGPU slices cannot do TP within a single physical card).
     tp_size = 1
     while tp_size * 2 <= best['gpu_count']:
         tp_size *= 2
+    tp_size = min(tp_size, physical_gpus)
     tp_size = max(tp_size, 1)
 
     # max_model_len cap by SLO
