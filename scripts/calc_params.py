@@ -200,11 +200,12 @@ def try_bootstrap_preset(req_vram: float, vram_map: dict) -> bool:
         if per_gpu_bytes * count * 0.9 < req_vram:
             continue
             
-        # Scale host CPU and Memory limits to avoid weights loading CPU OOM
-        preset_cpu_req = max(4, count * 4)
-        preset_cpu_lim = max(8, count * 8)
-        preset_mem_req = f"{max(8, count * 16)}Gi"
-        preset_mem_lim = f"{max(16, count * 32)}Gi"
+        # We keep host CPU and memory requirements modest since VRAM is the primary bottleneck.
+        # This avoids scheduling/oversubscription issues and fits physical constraints (e.g. 18.6 GiB host RAM).
+        preset_cpu_req = 4
+        preset_cpu_lim = 8
+        preset_mem_req = "12Gi"
+        preset_mem_lim = "16Gi"
 
         preset_name = f"auto-preset-{hw['gpu_product'].lower()}-{count}x"
         
