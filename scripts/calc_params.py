@@ -56,6 +56,193 @@ def estimate_kv_per_token(parameters: str) -> int:
     return 4096
 
 
+def calculate_precise_kv_per_token(model_info: dict) -> int:
+    """
+    1. Try to compute KV cache per token using metadata fields already present in model_info.
+    2. Try to use transformers.AutoConfig if available.
+    3. Fallback to 0.
+    """
+    layers = model_info.get('num_layers')
+    hidden_size = model_info.get('hidden_size')
+    num_heads = model_info.get('num_heads')
+    kv_heads = model_info.get('num_key_value_heads')
+
+    # Method 1: Use metadata fields parsed by BFF
+    if layers and hidden_size and num_heads:
+        if kv_heads is None:
+            kv_heads = num_heads  # Fallback to MHA
+        head_dim = hidden_size // num_heads
+        # 2 (Key + Value) * 2 (Bytes for BF16) * layers * kv_heads * head_dim
+        return 2 * 2 * layers * kv_heads * head_dim
+
+    # Method 2: Use transformers AutoConfig
+    source_uri = model_info.get('source_uri') or model_info.get('repo_name')
+    if source_uri:
+        try:
+            from transformers import AutoConfig
+            # Load config (local or remote metadata)
+            config = AutoConfig.from_pretrained(source_uri, trust_remote_code=True)
+            cfg_layers = getattr(config, "num_hidden_layers", 0)
+            cfg_hidden_size = getattr(config, "hidden_size", 0)
+            cfg_num_heads = getattr(config, "num_attention_heads", 0)
+            cfg_kv_heads = getattr(config, "num_key_value_heads", cfg_num_heads)
+            cfg_head_dim = getattr(config, "head_dim", 0) or (cfg_hidden_size // cfg_num_heads if cfg_num_heads else 0)
+            
+            if cfg_layers and cfg_kv_heads and cfg_head_dim:
+                return 2 * 2 * cfg_layers * cfg_kv_heads * cfg_head_dim
+        except Exception:
+            pass
+
+    return 0
+
+
+def discover_local_hardware(vram_map: dict) -> dict:
+    """
+    Query local GPU and CPU/RAM using nvidia-smi and kubectl.
+    """
+    import subprocess
+    result = {"gpu_product": "", "gpu_count": 0, "gpu_memory": "0Gi", "cpu_limit": "8", "mem_limit": "16Gi"}
+    
+    # 1. Get GPU Name
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5, check=True
+        )
+        gpu_name = proc.stdout.strip().split('\n')[0]
+        # Normalize (replace spaces with dashes, e.g. "NVIDIA GB10" -> "NVIDIA-GB10")
+        result["gpu_product"] = "-".join(gpu_name.split())
+    except Exception:
+        pass
+
+    # 2. Get GPU VRAM (prefer from vram_map using detected product name)
+    vram_bytes = 0.0
+    if result["gpu_product"] in vram_map:
+        vram_bytes = vram_map[result["gpu_product"]]
+        result["gpu_memory"] = f"{round(vram_bytes / 1024**3, 1)}Gi"
+    
+    # If not in vram_map, try nvidia-smi
+    if vram_bytes == 0.0:
+        try:
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5, check=True
+            )
+            total_vram_mib = int(proc.stdout.strip().split('\n')[0])
+            result["gpu_memory"] = f"{round(total_vram_mib / 1024, 1)}Gi"
+        except Exception:
+            # Final fallback if both failed
+            result["gpu_memory"] = "24.0Gi"
+
+    # 3. Get allocatable resources from K8s node
+    try:
+        # Get first node name
+        cmd_node = ["kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"]
+        node_name = subprocess.run(cmd_node, capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        
+        # Get allocatable resources
+        cmd_alloc = ["kubectl", "get", "node", node_name, "-o", "json"]
+        alloc_data = json.loads(subprocess.run(cmd_alloc, capture_output=True, text=True, timeout=5, check=True).stdout)
+        alloc = alloc_data.get("status", {}).get("allocatable", {})
+        
+        # GPU Count
+        gpu_str = alloc.get("nvidia.com/gpu", "0")
+        result["gpu_count"] = int(gpu_str)
+        
+        # CPU Limit (take half of allocatable)
+        cpu_alloc = int(alloc.get("cpu", "8").replace('m', ''))
+        # If it has millicores, handle it
+        if "m" in alloc.get("cpu", ""):
+            cpu_alloc = cpu_alloc // 1000
+        result["cpu_limit"] = str(max(8, cpu_alloc))
+        
+        # Memory Limit (allocatable minus 4Gi, in Gi)
+        mem_str = alloc.get("memory", "16384000Ki")
+        if mem_str.endswith("Ki"):
+            mem_bytes = int(mem_str[:-2]) * 1024
+        elif mem_str.endswith("Mi"):
+            mem_bytes = int(mem_str[:-2]) * 1024**2
+        elif mem_str.endswith("Gi"):
+            mem_bytes = int(mem_str[:-2]) * 1024**3
+        else:
+            mem_bytes = int(mem_str)
+        mem_gb = mem_bytes / 1024**3
+        result["mem_limit"] = f"{max(16, int(mem_gb - 4))}Gi"
+    except Exception:
+        # Fallbacks
+        if not result["gpu_count"]:
+            result["gpu_count"] = 1
+            
+    return result
+
+
+def try_bootstrap_preset(req_vram: float, vram_map: dict) -> bool:
+    import subprocess
+    try:
+        # Check kubectl
+        subprocess.run(["kubectl", "version", "--client"], capture_output=True, check=True, timeout=5)
+    except Exception:
+        return False
+
+    hw = discover_local_hardware(vram_map)
+    if not hw["gpu_product"] or hw["gpu_count"] == 0:
+        return False
+
+    # Standard GPU memory parsed into bytes to check if it's feasible
+    per_gpu_bytes = parse_vram_bytes(hw["gpu_memory"])
+    
+    # We dynamically create presets for different GPU counts (1x, 2x, 4x, 8x) up to allocatable gpu_count
+    created_any = False
+    for count in [1, 2, 4, 8]:
+        if count > hw["gpu_count"]:
+            break
+        # Only create if the total VRAM is enough
+        if per_gpu_bytes * count * 0.9 < req_vram:
+            continue
+            
+        # Scale host CPU and Memory limits to avoid weights loading CPU OOM
+        preset_cpu_req = max(4, count * 4)
+        preset_cpu_lim = max(8, count * 8)
+        preset_mem_req = f"{max(8, count * 16)}Gi"
+        preset_mem_lim = f"{max(16, count * 32)}Gi"
+
+        preset_name = f"auto-preset-{hw['gpu_product'].lower()}-{count}x"
+        
+        yaml_content = f"""apiVersion: afsbox.asus.com/v1beta1
+kind: ResourcePreset
+metadata:
+  name: {preset_name}
+  namespace: afsbox-system
+spec:
+  enabled: true
+  cpu:
+    requests: "{preset_cpu_req}"
+    limits: "{preset_cpu_lim}"
+  memory:
+    requests: "{preset_mem_req}"
+    limits: "{preset_mem_lim}"
+  gpuInfo:
+    gpu: {count}
+    product: "{hw['gpu_product']}"
+    memory: "{hw['gpu_memory']}"
+    resourceName: "nvidia.com/gpu"
+"""
+        try:
+            subprocess.run(
+                ["kubectl", "apply", "-f", "-"],
+                input=yaml_content,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10
+            )
+            created_any = True
+        except Exception:
+            pass
+            
+    return created_any
+
+
 def max_num_seqs_for_slo(slo: str) -> int:
     return {'latency': 16, 'throughput': 256}.get(slo, 64)
 
@@ -85,7 +272,9 @@ def main():
 
     # Fallback kv estimate if not available
     if not kv_per_token:
-        kv_per_token = estimate_kv_per_token(parameters)
+        kv_per_token = calculate_precise_kv_per_token(model_info)
+        if not kv_per_token:
+            kv_per_token = estimate_kv_per_token(parameters)
 
     # Build GPU VRAM map from capability
     devices = cap_data.get('gpu', {}).get('devices', [])
@@ -129,6 +318,57 @@ def main():
 
     feasible = [r for r in results if r['can_fit']]
 
+    if not feasible:
+        # Try to dynamically bootstrap compatible ResourcePreset
+        if try_bootstrap_preset(req_vram, vram_map):
+            import subprocess
+            try:
+                # Query fresh presets
+                proc = subprocess.run(
+                    ["kubectl", "get", "resourcepresets.afsbox.asus.com", "-n", "afsbox-system", "-o", "json"],
+                    capture_output=True, text=True, timeout=5, check=True
+                )
+                fresh_presets_data = json.loads(proc.stdout)
+                
+                # Re-evaluate
+                presets = fresh_presets_data.get('items', [])
+                results = []
+                for p in presets:
+                    spec = p.get('spec', {})
+                    if not spec.get('enabled', True):
+                        continue
+                    gpu_info  = spec.get('gpuInfo', {})
+                    product   = gpu_info.get('product', '')
+                    gpu_count = gpu_info.get('gpu', 1) or 1
+                    per_gpu   = parse_vram_bytes(gpu_info.get('memory', '0'))
+                    if per_gpu == 0:
+                        continue
+                        
+                    total_vram = per_gpu * gpu_count * 0.9
+                    can_fit    = total_vram >= req_vram
+                    avail_kv   = max(total_vram - req_vram, 0)
+
+                    if kv_per_token > 0:
+                        eff_ctx = min(int(avail_kv / (kv_per_token * max_num_seqs)), context_len)
+                    else:
+                        eff_ctx = context_len
+
+                    results.append({
+                        'name':              p.get('metadata', {}).get('name', ''),
+                        'can_fit':           can_fit,
+                        'gpu_count':         gpu_count,
+                        'product':           product,
+                        'family':            gpu_families.get(product, 'blackwell'),
+                        'per_gpu_vram_bytes': per_gpu,
+                        'effective_ctx':     eff_ctx,
+                        'total_vram_gb':     round(total_vram / 1e9, 1),
+                        'used_gb':           round(req_vram / 1e9, 1),
+                    })
+                
+                feasible = [r for r in results if r['can_fit']]
+            except Exception:
+                pass
+
     if slo == 'latency':
         # Prefer fewest GPUs with sufficient context
         min_ctx = min(8192, context_len)
@@ -146,8 +386,12 @@ def main():
     best = feasible[0]
     per_gpu = best['per_gpu_vram_bytes']
 
-    # Calculate tensor parallel size (minimum GPUs needed for weights)
-    tp_size = math.ceil(req_vram / per_gpu) if per_gpu > 0 else 1
+    # Calculate tensor parallel size.
+    # 1. We match tp_size to the preset's gpu_count to maximize resource utilization.
+    # 2. We align to the nearest lower power of 2 for vLLM compatibility.
+    tp_size = 1
+    while tp_size * 2 <= best['gpu_count']:
+        tp_size *= 2
     tp_size = max(tp_size, 1)
 
     # max_model_len cap by SLO

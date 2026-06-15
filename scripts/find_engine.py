@@ -42,6 +42,109 @@ def version_str(t: tuple) -> str:
     return '.'.join(str(x) for x in t)
 
 
+def detect_image_source() -> str:
+    # Track 1: Outbound TCP socket test to Docker Hub
+    import socket
+    try:
+        socket.setdefaulttimeout(3)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("registry-1.docker.io", 443))
+        s.close()
+        return "vllm/vllm-openai:v0.6.3"
+    except Exception:
+        pass
+
+    # Track 2: Try to discover local private registry from existing controllers
+    import subprocess
+    try:
+        cmd = ["kubectl", "get", "deployment", "afsbox-controller", "-n", "afsbox-system", "-o", "jsonpath={.spec.template.spec.containers[0].image}"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0:
+            image_path = proc.stdout.strip()
+            parts = image_path.split('/')
+            if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
+                # Reconstruct image path with local private registry prefix
+                return f"{parts[0]}/afsbox/vllm-openai:v0.6.3"
+    except Exception:
+        pass
+
+    # Fallback to public
+    return "vllm/vllm-openai:v0.6.3"
+
+
+def try_bootstrap_engine() -> bool:
+    import subprocess
+    try:
+        # Check if kubectl is available
+        subprocess.run(["kubectl", "version", "--client"], capture_output=True, check=True, timeout=5)
+    except Exception:
+        return False  # No kubectl, cannot auto-bootstrap
+
+    # Auto detect image
+    image = detect_image_source()
+
+    # Generate ModelEngine YAML
+    yaml_content = f"""apiVersion: afsbox.asus.com/v1beta1
+kind: ModelEngine
+metadata:
+  name: auto-vllm-engine
+  namespace: afsbox-system
+spec:
+  displayName: "Auto vLLM Engine"
+  engine:
+    type: vllm
+    servicePort: 8000
+  modelType: llm
+  chartRef:
+    name: inference-engine
+    namespace: afsbox-system
+  values:
+    image: "{image}"
+    shm:
+      enabled: true
+      size: 12Gi
+  additionalQuestions:
+    - variable: tensorParallelSize
+      type: integer
+      label: "Tensor Parallel Size"
+      required: false
+      default: 1
+    - variable: maxModelLen
+      type: integer
+      label: "Max Model Length"
+      required: false
+      default: 2048
+    - variable: gpuMemoryUtilization
+      type: float
+      label: "GPU Memory Utilization"
+      required: false
+      default: 0.9
+    - variable: maxNumSeqs
+      type: integer
+      label: "Max Num Seqs"
+      required: false
+      default: 64
+    - variable: dtype
+      type: string
+      label: "Data Type"
+      required: false
+      default: "bfloat16"
+"""
+    try:
+        # Apply YAML via kubectl
+        subprocess.run(
+            ["kubectl", "apply", "-f", "-"],
+            input=yaml_content,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10
+        )
+        return True
+    except Exception:
+        return False
+
+
 def main():
     if len(sys.argv) < 3:
         print('ERROR: usage: find_engine.py <API_BASE_URL> <ACCESS_TOKEN> [MIN_VERSION]')
@@ -69,6 +172,19 @@ def main():
 
     # Filter vllm engines
     engines = [e for e in data.get('engines', []) if e.get('engine', {}).get('type') == 'vllm']
+
+    if not engines:
+        # Attempt to auto bootstrap ModelEngine
+        if try_bootstrap_engine():
+            # Retry API call once to fetch the newly created engine
+            try:
+                import time
+                time.sleep(2)
+                with urllib.request.urlopen(req) as resp:
+                    data = json.loads(resp.read())
+                engines = [e for e in data.get('engines', []) if e.get('engine', {}).get('type') == 'vllm']
+            except Exception:
+                pass
 
     if not engines:
         print(
