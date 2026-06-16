@@ -209,8 +209,12 @@ def try_bootstrap_preset(req_vram: float, vram_map: dict) -> bool:
         
         preset_cpu_req = max(2, int(cpu_alloc * gpu_ratio * 0.5))
         preset_cpu_lim = max(4, int(cpu_alloc * gpu_ratio))
-        preset_mem_req = f"{max(8, int(mem_alloc_gb * gpu_ratio * 0.5))}Gi"
-        preset_mem_lim = f"{max(16, int(mem_alloc_gb * gpu_ratio))}Gi"
+        if mem_alloc_gb <= 20:
+            preset_mem_req = "5Gi"
+            preset_mem_lim = "8Gi"
+        else:
+            preset_mem_req = f"{max(8, int(mem_alloc_gb * gpu_ratio * 0.5))}Gi"
+            preset_mem_lim = f"{max(16, int(mem_alloc_gb * gpu_ratio))}Gi"
 
         preset_name = f"auto-preset-{hw['gpu_product'].lower()}-{count}x"
         
@@ -455,6 +459,12 @@ def main():
     # VRAM utilisation %
     pct = round(req_vram / (best['total_vram_gb'] * 1e9) * 100, 1) if best['total_vram_gb'] > 0 else 0
 
+    gpu_memory_limit_mib = 0
+    gpu_cores_limit = 0
+    if vgpu_scale < 1.0:
+        gpu_memory_limit_mib = int((best['per_gpu_vram_bytes'] * vgpu_scale) / (1024**2))
+        gpu_cores_limit = int(100 * vgpu_scale)
+
     print(json.dumps({
         'preset':                 best['name'],
         'gpu_count':              best['gpu_count'],
@@ -468,6 +478,8 @@ def main():
         'vram_used_gb':           best['used_gb'],
         'vram_total_gb':          best['total_vram_gb'],
         'vram_pct':               pct,
+        'gpu_memory_limit_mib':   gpu_memory_limit_mib,
+        'gpu_cores_limit':        gpu_cores_limit,
     }))
     sys.exit(0)
 
