@@ -14,18 +14,16 @@ Exit codes:
     0 = success
     1 = discovery failed
 """
-import sys
+import base64
 import json
 import os
-import urllib.request
-import urllib.error
+import re
+import socket
 import ssl
 import subprocess
-import base64
-import socket
-import re
-import tempfile
-import shutil
+import sys
+import urllib.error
+import urllib.request
 
 ssl._create_default_https_context = ssl._create_unverified_context
 

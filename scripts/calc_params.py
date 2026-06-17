@@ -234,6 +234,7 @@ def try_bootstrap_preset(req_vram: float, vram_map: dict) -> bool:
             preset_mem_lim = f"{max(16, int(mem_alloc_gb * gpu_ratio))}Gi"
 
 
+
         preset_name = f"auto-preset-{hw['gpu_product'].lower()}-{count}x"
         
         sharing_block = ""
