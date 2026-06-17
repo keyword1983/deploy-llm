@@ -1,63 +1,50 @@
 ---
 name: deploy-llm
 description: 一鍵部署 LLM 模型到 afsbox 平台。當使用者說「我要部署 XXX 模型」、「幫我部署 Gemma/Llama/Qwen/DeepSeek 等模型」、「deploy 某個模型」、「我想跑 XXX」時，自動執行從找 Engine、查 Recipe、下載模型、計算參數到部署並等待就緒的完整流程。
-when_to_use: 使用者提到任何 LLM 模型名稱並表達部署、上線、運行意圖時。例如：「我要部署 gemma4 12b」、「幫我跑 llama 3.1 8b」、「部署 Qwen3 7B」、「我想用 DeepSeek R1」。
+when_to_use: 使用者提到 any LLM 模型名稱並表達部署、上線、運行意圖時。例如：「我要部署 gemma4 12b」、「幫我跑 llama 3.1 8b」、「部署 Qwen3 7B」、「我想用 DeepSeek R1」。
 argument-hint: [模型名稱或 HuggingFace model ID]
 ---
 
 你是 afsbox LLM 部署助理。使用者只要說出模型名稱，你就自動完成所有部署步驟。
 所有計算與 API 呼叫都透過 `scripts/` 目錄下的 Python 腳本執行，確保結果一致且節省 token。
 
-## 環境確認
+## 環境與認證確認 (一鍵自動探索)
 
-afsbox 平台使用 **Keycloak OIDC** 認證。執行前先確認以下變數，若未知則**詢問一次**，之後不再重複詢問：
+**只需執行一個腳本即可自動取得所有必要變數：**
 
-| 變數 | 說明 | 取得方式 |
-|---|---|---|
-| `API_BASE_URL` | afsbox API 基底網址 | 詢問使用者，例如 `http://afsbox.example.com` |
-| `ACCESS_TOKEN` | Keycloak access token（JWT） | 見下方取得方式 |
-| `PROJECT_ID` | 目標 Project ID | 詢問，或呼叫 `GET /api/v1/projects` 列出讓使用者選 |
-| `HF_CREDENTIAL_ID` | HuggingFace Token credential（選填） | 僅 gated/private 模型需要 |
-
-### 取得 Access Token
-
-有三種方式可以取得 `ACCESS_TOKEN`：
-
-#### 方式 1：自動腳本取得（優先，推薦）
-若執行環境有 `kubectl` 權限，`get_token.py` 會自動查詢 `afsbox-system` 的 Secret 以獲取 `client_id` (`afsbox-platform`) 與 `client_secret`，並透過 Keycloak Service IP 取得 Token。直接執行即可：
 ```bash
-python3 .gemini/skills/deploy-llm/scripts/get_token.py
-```
-*註：若此自動偵測成功，腳本會直接輸出 `ACCESS_TOKEN`。*
-
-#### 方式 2：手動 Curl 指令取得
-若能直接存取叢集網路，可透過 Keycloak Token 端點（例如 `10.43.242.207`）以 Resource Owner Password Credentials 方式直接獲取：
-```bash
-curl -s -X POST "http://10.43.242.207/realms/afsbox/protocol/openid-connect/token" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "client_id=afsbox-platform" \
-      -d "client_secret=PsumgknUP~UIRbCEFAruh1YzFdZepCeZ" \
-      -d "grant_type=password" \
-      -d "username=admin@asus.com" \
-      -d "password=admin" \
-      -d "scope=openid" | jq -r .access_token
+python3 /home/asus/.gemini/skills/deploy-llm/scripts/bootstrap_env.py > /tmp/bootstrap_env.json
+cat /tmp/bootstrap_env.json
 ```
 
-#### 方式 3：從瀏覽器 Cookie 換取（備用）
-afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie 中，可透過複製後以腳本換取：
-1. **取得 refresh_token**：登入 Portal 後，打開 DevTools (F12) → Application → Cookies → 找 `refresh_token` → 複製其 Value。
+腳本輸出 JSON：`{ api_base_url, access_token, project_id }`。將其解析為：
+- `API_BASE_URL` = `api_base_url`
+- `ACCESS_TOKEN` = `access_token`
+- `PROJECT_ID` = `project_id`
+
+腳本內部按以下優先順序自動探索，**不需手動介入**：
+
+| 變數 | 探索順序 |
+|---|---|
+| `ACCESS_TOKEN` | 1. 環境變數 → 2. K8s Secret + Keycloak (自動 DNS resolve + port 8080/80 fallback) → 3. 失敗則輸出錯誤 |
+| `API_BASE_URL` | 1. 環境變數 → 2. K8s 內網 FQDN (`afsbox-platform.afsbox-system.svc.cluster.local`) → 3. 從 Token JWT `iss` 欄位推导外部 URL → 4. kubectl 查詢 Ingress |
+| `PROJECT_ID` | 1. 環境變數 → 2. `GET /api/v1/projects` 取第一個 `phase=Ready` 專案的 **`namespace` 欄位** |
+
+> ⚠️ **重要**：`PROJECT_ID` 務必使用專案物件的 `namespace` 欄位值（如 `proj-xxxxxx`），**非展示用的 `id`**（如 `test-project`），否則後端 API 將回報 Namespace 找不到或 500 錯誤。
+
+> ⚠️ **Token 有效期：** 若中途 API 回傳 `401`，重新執行 `bootstrap_env.py` 刷新即可。
+
+> 💡 **手動 Fallback：** 若 `bootstrap_env.py` 失敗（例如無 kubectl 權限），可改用 `get_token.py` 從瀏覽器 refresh_token 換取 Token（見下方備用方式）。
+
+### 備用方式：從瀏覽器 Cookie 換取 Token
+若 `bootstrap_env.py` 完全無法自動取得 Token：
+1. **取得 refresh_token**：請使用者登入 afsbox Portal，打開瀏覽器 DevTools (F12) → Application → Cookies → 複製 `refresh_token` 的 Value。
 2. **換取 token**：
    ```bash
-   python3 .gemini/skills/deploy-llm/scripts/get_token.py "{API_BASE_URL}" "{REFRESH_TOKEN}"
+   python3 /home/asus/.gemini/skills/deploy-llm/scripts/get_token.py "{API_BASE_URL}" "{REFRESH_TOKEN}" > /tmp/token
    ```
 
-記錄取得的 `ACCESS_TOKEN`，供後續步驟使用。
-
-> ⚠️ **Token 有效期：**
-> - `access_token`：數分鐘到 1 小時（依 Keycloak 設定）
-> - `refresh_token`：數小時到數天（通常足夠完成整個部署流程）
->
-> 若中途 API 回傳 `401`，重新執行上述方法換新 `access_token` 即可。
+> 💡 `HF_CREDENTIAL_ID`：HuggingFace Token credential，僅 gated/private 模型需要。
 
 
 ---
@@ -97,7 +84,7 @@ afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie
 
 執行腳本（以實際值取代 `{API_BASE_URL}` 和 `{ACCESS_TOKEN}`）：
 
-!`python3 .gemini/skills/deploy-llm/scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}"`
 
 腳本輸出 JSON：`{ id, name, version, chartRef, servicePort }`
 
@@ -130,7 +117,7 @@ afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie
 
 執行腳本（以實際值取代，HARDWARE 可選填如 `h100`、`h200`）：
 
-!`python3 .gemini/skills/deploy-llm/scripts/find_recipe.py "{HF_MODEL_ID}" "{HARDWARE}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/find_recipe.py "{HF_MODEL_ID}" "{HARDWARE}"`
 
 腳本輸出 JSON：`{ found, min_vllm_version, argv, variants, has_fp8, has_nvfp4, recipe_url }`
 
@@ -144,7 +131,7 @@ afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie
 **驗證版本相容性**（LLM 推理）：
 若 `ENGINE_VERSION` < `RECIPE_MIN_VERSION`，重新執行 Step 2 腳本並加上 `MIN_VERSION` 參數：
 
-!`python3 .gemini/skills/deploy-llm/scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{RECIPE_MIN_VERSION}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{RECIPE_MIN_VERSION}"`
 
 ```
 [3/6] ✅ Recipe：最低 vLLM {RECIPE_MIN_VERSION}+  has_fp8={HAS_FP8}
@@ -157,7 +144,7 @@ afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie
 
 **4a. 確認是否已存在並產生 slug：**
 
-!`python3 .gemini/skills/deploy-llm/scripts/check_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/check_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}"`
 
 腳本輸出 JSON：`{ exists, repo_name, phase, slug }`
 
@@ -168,11 +155,11 @@ afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie
 
 執行腳本（若有 `HF_CREDENTIAL_ID` 則加在最後）：
 
-!`python3 .gemini/skills/deploy-llm/scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}"`
 
 若有 gated/private 模型需要 credential：
 
-!`python3 .gemini/skills/deploy-llm/scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}" "{HF_CREDENTIAL_ID}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}" "{HF_CREDENTIAL_ID}"`
 
 腳本輸出 JSON：`{ created, repo_name, source_uri }`
 
@@ -187,7 +174,7 @@ afsbox 使用 Keycloak OIDC，`refresh_token` 存在瀏覽器的 httpOnly cookie
 
 **4c. 輪詢下載狀態：**
 
-!`python3 .gemini/skills/deploy-llm/scripts/poll_download.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{REPO_NAME}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/poll_download.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{REPO_NAME}"`
 
 - 輸出以 `READY:` 開頭 → 解析 JSON，記錄為 `MODEL_INFO`
 - 輸出以 `FAILED:` 開頭 → 顯示錯誤訊息，詢問是否重試
@@ -220,9 +207,9 @@ Authorization: Bearer {ACCESS_TOKEN}
 
 **5b. 執行參數計算腳本：**
 
-!`python3 .gemini/skills/deploy-llm/scripts/calc_params.py '{MODEL_INFO}' '{PRESETS_JSON}' '{CAPABILITY_JSON}' balanced {HAS_FP8}`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/calc_params.py '{MODEL_INFO}' '{PRESETS_JSON}' '{CAPABILITY_JSON}' balanced {HAS_FP8}`
 
-腳本輸出 JSON：`{ preset, gpu_count, product, tp_size, max_model_len, dtype, gpu_memory_utilization, max_num_seqs, vram_used_gb, vram_total_gb, vram_pct }`
+腳本輸出 JSON：`{ preset, gpu_count, product, tp_size, max_model_len, dtype, gpu_memory_utilization, max_num_seqs, vram_used_gb, vram_total_gb, vram_pct, gpu_memory_limit_mib, gpu_cores_limit }`
 
 若輸出含 `"error"` 欄位，執行以下自我修復邏輯：
 
@@ -236,6 +223,8 @@ Authorization: Bearer {ACCESS_TOKEN}
 >    ```
 >    建立成功後，重新執行參數計算。
 > 4. 若無 K8s 權限，則引導使用者登入 Portal 至 **Admin > Resources > Presets** 手動新增適合模型大小的 GPU Preset（例如 GB10 96Gi 規格）。
+> ⚠️ **vGPU 實體卡調度限制注意**：
+> 在只有 1 張實體 GPU 的單節點/單卡環境中，排程器不支援將同一個容器的複數個虛擬卡分配在同一個實體 GPU 上（會報 `NodeInsufficientDevice`）。因此大模型（如 72B）**不能**選用 `gpu: 4` 的多虛擬卡 Preset，而應選用 `gpu: 1` 但 `sharing.nvidia.com/gpumem` 大顯存配置的 Preset（例如 `auto-preset-nvidia-gb10-1x-large`，配置 80 GiB 顯存）。`calc_params.py` 已對此自動優化，確保只推薦符合實體卡數上限的 Preset。
 
 記錄結果為 `PARAMS`。
 
@@ -271,7 +260,43 @@ Authorization: Bearer {ACCESS_TOKEN}
 | --max-num-seqs | `maxNumSeqs` |
 | --dtype | `dtype` |
 
-`SERVING_NAME` = `{REPO_NAME 前 30 字元}-serving`（注意：須將點號 `.` 替換為橫線 `-`，避免 Service 域名格式錯誤）
+> [!CAUTION]
+> **命名限制與點號字元規則：**
+> `SERVING_NAME` 必須為符合 DNS 標準之名稱，**絕對不能含有點號 `.`**（因為 Kubernetes 不允許 Service 的名稱含點號，否則 Helm 安裝會失敗，導致服務無 ClusterIP 與路由可用）。
+> 
+> 規則：`SERVING_NAME` = `{REPO_NAME 前 30 字元}-serving`（**務必將所有點號 `.` 替換為橫線 `-`**，例如 `qwen-qwen2.5-0.5b` 必須被改寫為 `qwen-qwen2-5-0-5b-serving`）。
+
+> 💡 **預防性寫入 answers 欄位**：
+> - 雖然一些指令參數（如 `values.command` 與 `values.env`）在 Engine 模板中標示為預設且唯讀 (`editable: false`)，但在發送 servings 部署時，**必須在 `answers` 中完整帶入所有的 `values.command` 與 `values.env` 欄位**，否則後端控制器並不會主動幫我們補全這些 default，導致 Pod 啟動參數遺失而無法正常運行。
+> 
+> 💡 **vGPU (Hami) 資源限制宣告與 Preset 連動機制**：
+> - AFSBox 的 `ResourcePreset` 資源支援 `gpuInfo.sharing` 配置（例如 `auto-preset-*` 已自動寫入 `nvidia.com/gpumem`）。當您選用有設定 `sharing` 的 Preset 時，Controller 會**自動為 Pod 注入顯存限制**，您**不需**在 `answers` 中手動填寫 `"values.resources"`。
+> - 若使用的 Preset 沒有宣告 `sharing` 顯存限額，且 `gpu_memory_limit_mib > 0`（vGPU 共享環境），則**必須**在 `answers` 中手動加入 `"values.resources"` 進行顯式限制，以防止 vLLM 搶占整張實體卡的顯存導致其他服務 Pending：
+>   ```json
+>   "values.resources": {
+>     "requests": {
+>       "nvidia.com/gpumem": {gpu_memory_limit_mib},
+>       "nvidia.com/gpucores": {gpu_cores_limit}
+>     },
+>     "limits": {
+>       "nvidia.com/gpumem": {gpu_memory_limit_mib},
+>       "nvidia.com/gpucores": {gpu_cores_limit}
+>     }
+>   }
+>   ```
+> - 注意：不需要使用點號字元（如 `values.resources.limits.nvidia.com/gpumem`），直接寫入一個結構化的巢狀 JSON 物件即可，這能完美避開 API 解析點號字元的 parser 限制。
+> 
+> 💡 **單節點資源受限環境之部署策略 (Deployment Strategy)**：
+> - 在資源受限的單節點叢集（如 allocatable memory 只有 18.6 GiB 的環境），若要「同時跑多個服務」或「進行滾動更新」，常會因 Host 記憶體不足而卡死（滾動更新會同時存在新舊兩個 Pod，導致 memory 需求加倍）。
+> - 為了避免此資源死鎖，**必須**將部署更新策略改為 `Recreate`（先刪除舊 Pod，再建立新 Pod），可在 `answers` 中加入：
+>   ```json
+>   "values.workload": {
+>     "replicas": 1,
+>     "strategy": {
+>       "type": "Recreate"
+>     }
+>   }
+>   ```
 
 **6b. 預覽部署 YAML：**
 
@@ -285,27 +310,36 @@ Content-Type: application/json
   "engineRef": "{ENGINE_ID}",
   "modelType": "llm",
   "chartRef": { "name": "{CHART_REF_NAME}" },
+  "engine": {
+    "type": "vllm",
+    "servicePort": 8000
+  },
   "answers": {
     "model.valueFrom.kind": "ModelRepository",
     "model.valueFrom.name": "{REPO_NAME}",
     "resource": "{preset}",
-    "{tensorParallelSize_var}": {tp_size},
-    "{maxModelLen_var}": {max_model_len},
-    "{gpuMemoryUtilization_var}": 0.9,
-    "{maxNumSeqs_var}": {max_num_seqs},
-    "{dtype_var}": "{dtype}",
+    "servedModelName": "{SERVING_NAME}",
+    "values.image": "nvcr.io/nvidia/vllm:26.02-py3",
+    "output.contextLength": {max_model_len},
+    "output.batchSize": {max_num_seqs},
+    "GPU_MEMORY_UTILIZATION": 0.9,
+    "MAX_NUM_BATCHED_TOKENS": 4096,
     "values.command": [
       "python3",
       "-m",
       "vllm.entrypoints.openai.api_server",
       "--model=${MODEL_PATH}",
-      "--served-model-name={SERVING_NAME}",
-      "--max-model-len={max_model_len}",
-      "--tensor-parallel-size={tp_size}",
-      "--dtype={dtype}",
-      "--port=8000",
-      "--max-num-seqs={max_num_seqs}",
-      "--gpu-memory-utilization=0.9"
+      "--served-model-name=${SERVED_MODEL_NAME}",
+      "--port=${SERVICE_PORT}",
+      "--max-model-len=${CONTEXT_LENGTH}",
+      "--max-num-seqs=${BATCH_SIZE}",
+      "--dtype=bfloat16",
+      "--gpu-memory-utilization=${GPU_MEMORY_UTILIZATION}",
+      "--max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS}"
+    ],
+    "values.env": [
+      {"name": "VLLM_NO_USAGE_STATS", "value": "1"},
+      {"name": "VLLM_DO_NOT_TRACK", "value": "1"}
     ]
   }
 }
@@ -327,27 +361,36 @@ Content-Type: application/json
 {
   "name": "{SERVING_NAME}",
   "engineRef": "{ENGINE_ID}",
+  "engine": {
+    "type": "vllm",
+    "servicePort": 8000
+  },
   "answers": {
     "model.valueFrom.kind": "ModelRepository",
     "model.valueFrom.name": "{REPO_NAME}",
-    "resource": "{PARAMS.preset}",
-    "{tensorParallelSize_var}": {tp_size},
-    "{maxModelLen_var}": {max_model_len},
-    "{gpuMemoryUtilization_var}": 0.9,
-    "{maxNumSeqs_var}": {max_num_seqs},
-    "{dtype_var}": "{dtype}",
+    "resource": "{preset}",
+    "servedModelName": "{SERVING_NAME}",
+    "values.image": "nvcr.io/nvidia/vllm:26.02-py3",
+    "output.contextLength": {max_model_len},
+    "output.batchSize": {max_num_seqs},
+    "GPU_MEMORY_UTILIZATION": 0.9,
+    "MAX_NUM_BATCHED_TOKENS": 4096,
     "values.command": [
       "python3",
       "-m",
       "vllm.entrypoints.openai.api_server",
       "--model=${MODEL_PATH}",
-      "--served-model-name={SERVING_NAME}",
-      "--max-model-len={max_model_len}",
-      "--tensor-parallel-size={tp_size}",
-      "--dtype={dtype}",
-      "--port=8000",
-      "--max-num-seqs={max_num_seqs}",
-      "--gpu-memory-utilization=0.9"
+      "--served-model-name=${SERVED_MODEL_NAME}",
+      "--port=${SERVICE_PORT}",
+      "--max-model-len=${CONTEXT_LENGTH}",
+      "--max-num-seqs=${BATCH_SIZE}",
+      "--dtype=bfloat16",
+      "--gpu-memory-utilization=${GPU_MEMORY_UTILIZATION}",
+      "--max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS}"
+    ],
+    "values.env": [
+      {"name": "VLLM_NO_USAGE_STATS", "value": "1"},
+      {"name": "VLLM_DO_NOT_TRACK", "value": "1"}
     ]
   }
 }
@@ -367,7 +410,7 @@ API 呼叫失敗（非 2xx）時顯示錯誤並停止。
 
 ## STEP 7｜等待服務就緒
 
-!`python3 .gemini/skills/deploy-llm/scripts/poll_serving.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{SERVING_NAME}"`
+!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/poll_serving.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{SERVING_NAME}"`
 
 - 輸出以 `READY:` 開頭 → 解析 JSON，顯示完整結果
 - 輸出 `TIMEOUT` → 顯示診斷建議
@@ -378,12 +421,14 @@ API 呼叫失敗（非 2xx）時顯示錯誤並停止。
 ✅ 部署完成！{HF_MODEL_ID}
 
 內部端點：{internal}
-外部端點：{external}
+外部端點：{external} (僅當 answers 中包含 externalAccess=true)
 模型名稱：{model_name}
 總耗時：  {elapsed} 秒
 
-快速測試：
-curl {internal}/v1/chat/completions \
+快速內部測試 (由於 AI Gateway 內部路由採用 Header 匹配，測試時必須包含 Host 與 x-model Header)：
+curl -s -X POST {internal}/v1/chat/completions \
+  -H "Host: afsbox-aigateway.afsbox-system.svc.cluster.local" \
+  -H "x-model: {model_name}" \
   -H "Content-Type: application/json" \
   -d '{"model":"{model_name}","messages":[{"role":"user","content":"你好"}]}'
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -405,11 +450,27 @@ curl {internal}/v1/chat/completions \
 
 ---
 
-## 錯誤處理原則
+## 錯誤處理與常見部署異常排除 (Kubernetes 層級)
 
-- 每個 API 呼叫失敗都要顯示 HTTP status code + response body 摘要
-- 不靜默跳過任何錯誤
-- 使用者隨時可說「停止」或「取消」中斷流程
-- API 回傳 401 → 提示 Token 過期，請重新取得
-- API 回傳 403 → 提示該 Project 可能無權限存取
-- API 回傳 404 → 顯示找不到的資源名稱，確認 ID 是否正確
+- 每個 API 呼叫失敗都要顯示 HTTP status code + response body 摘要。
+- 不靜默跳過任何錯誤。
+- 使用者隨時可說「停止」或「取消」中斷流程。
+- API 回傳 401 → 提示 Token 過期，請重新取得。
+- API 回傳 403 → 提示該 Project 可能無權限存取。
+- API 回傳 404 → 顯示找不到的資源名稱，確認 ID 是否正確。
+
+### 🚨 故障排除指南：
+
+#### 1. 新的 Pod 處於 Pending (顯示 Insufficient memory 資源死鎖)
+*   **原因**：強行刪除卡住的 servings 或 HelmRelease 時，若透過 patch 移成了 finalizer，Flux 會跳過 uninstall，使舊 Pod 變成「孤兒 Pod」留在叢集內並持續佔用資源。再次部署的新 Pod 由於記憶體被孤兒 Pod 佔滿而調度失敗。
+*   **解決方法**：手動強制刪除該專案 Namespace 中的舊容器以釋放記憶體資源：
+    ```bash
+    kubectl delete pod -l afsbox.asus.com/model-serving={SERVING_NAME} -n {PROJECT_ID} --grace-period=0 --force
+    ```
+
+#### 2. HelmRelease 狀態為 ObservedGeneration: -1 且無事件更新
+*   **原因**：快速強行刪除資源時，Flux `helm-controller` 的 leader lease 或是工作線程發生卡鎖。
+*   **解決方法**：重啟 Flux 控制器以進行解鎖：
+    ```bash
+    kubectl rollout restart deployment helm-controller -n flux-system
+    ```

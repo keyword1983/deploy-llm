@@ -191,6 +191,23 @@ def try_bootstrap_preset(req_vram: float, vram_map: dict) -> bool:
     # Standard GPU memory parsed into bytes to check if it's feasible
     per_gpu_bytes = parse_vram_bytes(hw["gpu_memory"])
     
+    # Calculate vGPU scale factor if Hami is enabled
+    vgpu_scale = 1.0
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True, text=True, timeout=5, check=True
+        )
+        physical_gpus = max(1, len(proc.stdout.strip().split('\n')))
+        cmd_node = ["kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}"]
+        node_name = subprocess.run(cmd_node, capture_output=True, text=True, timeout=5, check=True).stdout.strip()
+        cmd_alloc = ["kubectl", "get", "node", node_name, "-o", "jsonpath={.status.allocatable.nvidia\\.com/gpu}"]
+        k8s_gpus = int(subprocess.run(cmd_alloc, capture_output=True, text=True, timeout=5, check=True).stdout.strip())
+        if k8s_gpus > physical_gpus:
+            vgpu_scale = physical_gpus / k8s_gpus
+    except Exception:
+        pass
+
     # We dynamically create presets for different GPU counts (1x, 2x, 4x, 8x) up to allocatable gpu_count
     created_any = False
     for count in [1, 2, 4, 8]:
@@ -209,11 +226,28 @@ def try_bootstrap_preset(req_vram: float, vram_map: dict) -> bool:
         
         preset_cpu_req = max(2, int(cpu_alloc * gpu_ratio * 0.5))
         preset_cpu_lim = max(4, int(cpu_alloc * gpu_ratio))
-        preset_mem_req = f"{max(8, int(mem_alloc_gb * gpu_ratio * 0.5))}Gi"
-        preset_mem_lim = f"{max(16, int(mem_alloc_gb * gpu_ratio))}Gi"
+        if mem_alloc_gb <= 20:
+            preset_mem_req = "5Gi"
+            preset_mem_lim = "8Gi"
+        else:
+            preset_mem_req = f"{max(8, int(mem_alloc_gb * gpu_ratio * 0.5))}Gi"
+            preset_mem_lim = f"{max(16, int(mem_alloc_gb * gpu_ratio))}Gi"
+
 
         preset_name = f"auto-preset-{hw['gpu_product'].lower()}-{count}x"
         
+        sharing_block = ""
+        preset_gpu_count = count
+        if vgpu_scale < 1.0:
+            preset_gpu_count = 1
+            sharing_gpumem = int((per_gpu_bytes * vgpu_scale * count) / (1024**2))
+            sharing_gpucores = int(100 * vgpu_scale * count)
+            sharing_block = f"""
+    sharing:
+      nvidia.com/gpumem: "{sharing_gpumem}"
+      nvidia.com/gpucores: "{sharing_gpucores}"
+"""
+
         yaml_content = f"""apiVersion: afsbox.asus.com/v1beta1
 kind: ResourcePreset
 metadata:
@@ -228,10 +262,10 @@ spec:
     requests: "{preset_mem_req}"
     limits: "{preset_mem_lim}"
   gpuInfo:
-    gpu: {count}
+    gpu: {preset_gpu_count}
     product: "{hw['gpu_product']}"
     memory: "{hw['gpu_memory']}"
-    resourceName: "nvidia.com/gpu"
+    resourceName: "nvidia.com/gpu"{sharing_block}
 """
         try:
             subprocess.run(
@@ -311,21 +345,56 @@ def main():
     except Exception:
         pass
 
+    # Try to load detailed presets from kubectl if possible to get 'sharing' configs
+    k8s_presets_map = {}
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["kubectl", "get", "resourcepresets.afsbox.asus.com", "-n", "afsbox-system", "-o", "json"],
+            capture_output=True, text=True, timeout=5, check=True
+        )
+        items = json.loads(proc.stdout).get("items", [])
+        for item in items:
+            name = item.get("metadata", {}).get("name", "")
+            spec = item.get("spec", {})
+            if name:
+                k8s_presets_map[name] = spec
+    except Exception:
+        pass
+
     # Evaluate each enabled preset
     presets = presets_data.get('resourcepresets', [])
     results = []
     for p in presets:
         if not p.get('enabled', True):
             continue
+        name      = p.get('name', '')
         product   = p.get('gpu_product', '')
         gpu_count = p.get('gpu', 1) or 1
+        
+        # Enforce that virtual GPU count cannot exceed physical GPU count
+        if gpu_count > physical_gpus:
+            continue
+            
         per_gpu   = vram_map.get(product, 0)
         if per_gpu == 0:
             continue  # Unknown GPU, skip
 
-        # Apply vGPU scale factor to get true VRAM allocatable per vGPU unit
-        actual_per_gpu = per_gpu * vgpu_scale
-        total_vram = actual_per_gpu * gpu_count * 0.9
+        # Check if we have sharing gpumem configuration
+        gpumem_bytes = 0.0
+        if name in k8s_presets_map:
+            spec = k8s_presets_map[name]
+            sharing_gpumem = spec.get("gpuInfo", {}).get("sharing", {}).get("nvidia.com/gpumem", "")
+            if sharing_gpumem:
+                gpumem_bytes = parse_vram_bytes(f"{sharing_gpumem}MiB")
+
+        if gpumem_bytes > 0:
+            total_vram = gpumem_bytes * gpu_count * 0.9
+        else:
+            # Apply vGPU scale factor to get true VRAM allocatable per vGPU unit
+            actual_per_gpu = per_gpu * vgpu_scale
+            total_vram = actual_per_gpu * gpu_count * 0.9
+
         can_fit    = total_vram >= req_vram
         avail_kv   = max(total_vram - req_vram, 0)
 
@@ -337,7 +406,7 @@ def main():
             eff_ctx = context_len
 
         results.append({
-            'name':              p['name'],
+            'name':              name,
             'can_fit':           can_fit,
             'gpu_count':         gpu_count,
             'product':           product,
@@ -372,13 +441,27 @@ def main():
                     gpu_info  = spec.get('gpuInfo', {})
                     product   = gpu_info.get('product', '')
                     gpu_count = gpu_info.get('gpu', 1) or 1
+                    
+                    # Enforce physical GPU limit
+                    if gpu_count > physical_gpus:
+                        continue
+                        
                     per_gpu   = parse_vram_bytes(gpu_info.get('memory', '0'))
                     if per_gpu == 0:
                         continue
                         
-                    # Apply vGPU scale factor to get true VRAM allocatable per vGPU unit
-                    actual_per_gpu = per_gpu * vgpu_scale
-                    total_vram = actual_per_gpu * gpu_count * 0.9
+                    gpumem_bytes = 0.0
+                    sharing_gpumem = gpu_info.get("sharing", {}).get("nvidia.com/gpumem", "")
+                    if sharing_gpumem:
+                        gpumem_bytes = parse_vram_bytes(f"{sharing_gpumem}MiB")
+
+                    if gpumem_bytes > 0:
+                        total_vram = gpumem_bytes * gpu_count * 0.9
+                    else:
+                        # Apply vGPU scale factor to get true VRAM allocatable per vGPU unit
+                        actual_per_gpu = per_gpu * vgpu_scale
+                        total_vram = actual_per_gpu * gpu_count * 0.9
+                        
                     can_fit    = total_vram >= req_vram
                     avail_kv   = max(total_vram - req_vram, 0)
 
@@ -455,6 +538,12 @@ def main():
     # VRAM utilisation %
     pct = round(req_vram / (best['total_vram_gb'] * 1e9) * 100, 1) if best['total_vram_gb'] > 0 else 0
 
+    gpu_memory_limit_mib = 0
+    gpu_cores_limit = 0
+    if vgpu_scale < 1.0:
+        gpu_memory_limit_mib = int((best['per_gpu_vram_bytes'] * vgpu_scale * best['gpu_count']) / (1024**2))
+        gpu_cores_limit = int(100 * vgpu_scale * best['gpu_count'])
+
     print(json.dumps({
         'preset':                 best['name'],
         'gpu_count':              best['gpu_count'],
@@ -468,8 +557,11 @@ def main():
         'vram_used_gb':           best['used_gb'],
         'vram_total_gb':          best['total_vram_gb'],
         'vram_pct':               pct,
+        'gpu_memory_limit_mib':   gpu_memory_limit_mib,
+        'gpu_cores_limit':        gpu_cores_limit,
     }))
     sys.exit(0)
+
 
 
 if __name__ == '__main__':
