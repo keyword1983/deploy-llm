@@ -100,7 +100,7 @@ python3 scripts/resolve_model.py "{USER_INPUT}"
 > 1. 若環境有 `kubectl` 權限，腳本會自動完成建立。
 > 2. 若因缺乏權限等原因自動建立失敗，請在對話中詳細引導使用者登入 Portal 至 **Admin > Models > Templates** 手動建立 vLLM Engine 範本。
 
-記錄 `ENGINE_ID`、`ENGINE_NAME`、`ENGINE_VERSION`、`CHART_REF_NAME`。
+記錄 `ENGINE_ID`、`ENGINE_NAME`、`ENGINE_VERSION`、`CHART_REF_NAME`、`ENGINE_IMAGE`。
 
 > 💡 **vLLM Engine 映像檔說明 (Image Description)：**
 > - vLLM Engine 內使用的 Container Image 預設為 NVIDIA NGC 的 vLLM 映像檔 (例如 `nvcr.io/nvidia/vllm`)。
@@ -313,7 +313,7 @@ Content-Type: application/json
     "model.valueFrom.name": "{REPO_NAME}",
     "resource": "{preset}",
     "servedModelName": "{SERVING_NAME}",
-    "values.image": "nvcr.io/nvidia/vllm:26.02-py3",
+    "values.image": "{ENGINE_IMAGE}",
     "output.contextLength": {max_model_len},
     "output.batchSize": {max_num_seqs},
     "GPU_MEMORY_UTILIZATION": 0.9,
@@ -364,7 +364,7 @@ Content-Type: application/json
     "model.valueFrom.name": "{REPO_NAME}",
     "resource": "{preset}",
     "servedModelName": "{SERVING_NAME}",
-    "values.image": "nvcr.io/nvidia/vllm:26.02-py3",
+    "values.image": "{ENGINE_IMAGE}",
     "output.contextLength": {max_model_len},
     "output.batchSize": {max_num_seqs},
     "GPU_MEMORY_UTILIZATION": 0.9,

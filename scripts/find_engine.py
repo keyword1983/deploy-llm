@@ -6,7 +6,7 @@ Usage:
   python3 find_engine.py <API_BASE_URL> <ACCESS_TOKEN> [MIN_VERSION]
 
 Output (stdout):
-  JSON: { id, name, version, chartRef }
+  JSON: { id, name, version, chartRef, image }
   or:   ERROR: <message>
 
 Exit codes:
@@ -48,7 +48,7 @@ def version_str(t: tuple) -> str:
     return '.'.join(str(x) for x in t)
 
 
-def detect_image_source() -> str:
+def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
     # 1. Detect hardware characteristics
     import platform
     import subprocess
@@ -70,12 +70,12 @@ def detect_image_source() -> str:
 
     # Determine base image based on hardware configuration
     if is_arm or is_blackwell:
-        base_image = "nvcr.io/nvidia/vllm:26.02-py3"
+        preferred_image = "nvcr.io/nvidia/vllm:26.02-py3"
     else:
-        # Traditional x86 + non-Blackwell setup -> use official public vLLM image
-        base_image = "vllm/vllm-openai:latest"
+        preferred_image = "vllm/vllm-openai:latest"
 
-    # 2. Try to discover local private registry from existing controllers (offline mode)
+    # Try to discover local private registry from existing controllers (offline mode)
+    private_registry = ""
     try:
         cmd = ["kubectl", "get", "deployment", "afsbox-controller", "-n", "afsbox-system", "-o", "jsonpath={.spec.template.spec.containers[0].image}"]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
@@ -83,16 +83,64 @@ def detect_image_source() -> str:
             image_path = proc.stdout.strip()
             parts = image_path.split('/')
             if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
-                # Reconstruct image path with local private registry prefix
-                if is_arm or is_blackwell:
-                    return f"{parts[0]}/nvidia/vllm:26.02-py3"
-                else:
-                    return f"{parts[0]}/afsbox/vllm-openai:latest"
+                private_registry = parts[0]
     except Exception:
         pass
 
-    # Fallback to public registry URL
-    return base_image
+    # Reconstruct preferred image with private registry if available
+    if private_registry:
+        if "nvcr.io/" in preferred_image:
+            preferred_image = f"{private_registry}/nvidia/vllm:26.02-py3"
+        else:
+            preferred_image = f"{private_registry}/afsbox/vllm-openai:latest"
+
+    # 2. Query Engine details from API to see allowed image options
+    engine_url = f"{api_base}/api/v1/models/engines/{engine_id}"
+    req = urllib.request.Request(engine_url, headers={
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+    })
+    
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            engine_data = json.loads(resp.read())
+            
+            # Find values.image question
+            questions = engine_data.get("additionalQuestions", [])
+            image_q = next((q for q in questions if q.get("variable") == "values.image"), None)
+            if image_q:
+                options = image_q.get("options", [])
+                default_val = image_q.get("default", "")
+                
+                if options:
+                    # If preferred_image is in options, use it
+                    if preferred_image in options:
+                        return preferred_image
+                    
+                    # Try to find a matching option containing "vllm"
+                    vllm_options = [opt for opt in options if "vllm" in opt.lower()]
+                    if vllm_options:
+                        # Prefer the one matching hardware (nvidia/vllm vs vllm-openai)
+                        if is_arm or is_blackwell:
+                            nvidia_opts = [opt for opt in vllm_options if "nvidia" in opt.lower()]
+                            if nvidia_opts:
+                                return nvidia_opts[0]
+                        else:
+                            openai_opts = [opt for opt in vllm_options if "openai" in opt.lower()]
+                            if openai_opts:
+                                return openai_opts[0]
+                        return vllm_options[0]
+                    
+                    # Return the first option as fallback
+                    return options[0]
+                
+                if default_val:
+                    return default_val
+    except Exception as e:
+        sys.stderr.write(f"  ⚠️ Failed to query engine details from API: {e}\n")
+        sys.stderr.flush()
+
+    return preferred_image
 
 
 def try_bootstrap_engine() -> bool:
@@ -103,8 +151,42 @@ def try_bootstrap_engine() -> bool:
     except Exception:
         return False  # No kubectl, cannot auto-bootstrap
 
-    # Auto detect image
-    image = detect_image_source()
+    # Auto detect image tag using default fallback since we don't have token during boot
+    # but we can detect based on hardware
+    import platform
+    is_arm = platform.machine().lower() in ["aarch64", "arm64"]
+    is_blackwell = False
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode == 0:
+            gpu_name = proc.stdout.strip().lower()
+            if any(x in gpu_name for x in ["gb10", "gb200", "b200", "blackwell"]):
+                is_blackwell = True
+    except Exception:
+        pass
+
+    if is_arm or is_blackwell:
+        image = "nvcr.io/nvidia/vllm:26.02-py3"
+    else:
+        image = "vllm/vllm-openai:latest"
+
+    # Reconstruct with private registry if available
+    try:
+        cmd = ["kubectl", "get", "deployment", "afsbox-controller", "-n", "afsbox-system", "-o", "jsonpath={.spec.template.spec.containers[0].image}"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0:
+            image_path = proc.stdout.strip()
+            parts = image_path.split('/')
+            if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
+                if is_arm or is_blackwell:
+                    image = f"{parts[0]}/nvidia/vllm:26.02-py3"
+                else:
+                    image = f"{parts[0]}/afsbox/vllm-openai:latest"
+    except Exception:
+        pass
 
     # Generate ModelEngine YAML
     yaml_content = f"""apiVersion: afsbox.asus.com/v1beta1
@@ -127,6 +209,15 @@ spec:
       enabled: true
       size: 12Gi
   additionalQuestions:
+    - variable: values.image
+      type: reference_image
+      label: "Container Image"
+      description: "選擇 engine 的容器映像"
+      group: "BasicSetting"
+      required: true
+      editable: true
+      options:
+        - "{image}"
     - variable: tensorParallelSize
       type: integer
       label: "Tensor Parallel Size"
@@ -192,7 +283,6 @@ def main():
                 sys.stderr.write('  ⏳ Token expired (401), refreshing...\n')
                 sys.stderr.flush()
                 token = refresh_token()
-                req.add_header('Authorization', f'Bearer {token}')
                 # Remove old header first by rebuilding
                 req = urllib.request.Request(url, headers={
                     'Authorization': f'Bearer {token}',
@@ -248,12 +338,16 @@ def main():
         print(f'ERROR: latest engine version {version_str(best_ver)} < required {version_str(min_version)}')
         sys.exit(1)
 
+    # Dynamically detect optimal image tag based on allowed options in this specific engine
+    image_tag = detect_image_source(best['id'], api_base, token)
+
     result = {
         'id': best['id'],
         'name': best['name'],
         'version': version_str(best_ver),
         'chartRef': best.get('chartRef', {}),
         'servicePort': best.get('engine', {}).get('servicePort', 8000),
+        'image': image_tag,
         'all_versions': [version_str(parse_version(e)) for e in engines],
     }
     print(json.dumps(result))
