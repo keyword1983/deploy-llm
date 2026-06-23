@@ -74,7 +74,7 @@
   - 影響：部署失敗後沒有自動清理 ModelRepository 和失敗的 Serving
   - 方案：失敗時提供自動清理選項（刪除 Serving + 可選刪除 ModelRepository）
 
-- [ ] **H. 模型映射表維護機制**
+- [x] **H. 模型映射表維護機制**
   - 影響：STEP 1 的模型名稱對照表是靜態的，新模型需手動更新
   - 方案：加入 HF API 搜尋 fallback，根據輸入關鍵詞搜尋並請使用者確認
 
@@ -82,7 +82,7 @@
   - 影響：目前只支援單一基底模型，不支援 LoRA adapter 加載
   - 方案：SKILL.md 中加入 LoRA 部署的額外步驟和 `--lora-modules` 參數
 
-- [ ] **K. vLLM Image Tag 動態化**
+- [x] **K. vLLM Image Tag 動態化**
   - 影響：SKILL.md STEP 6 寫死 `"values.image": "nvcr.io/nvidia/vllm:26.02-py3"`
   - 方案：從 `find_engine.py::detect_image_source()` 回傳 image，SKILL.md 動態替換
 
