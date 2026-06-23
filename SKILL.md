@@ -52,26 +52,30 @@ cat /tmp/bootstrap_env.json
 
 ## 智慧推薦與模糊指令解析策略 (Intelligent Recommendation)
 
-當使用者提出模糊或不精確的部署命令時（例如：「推薦一個適合目前資源且寫 code 最好的模型」、「幫我裝一個最近很紅的推理模型」等），**你應發揮 Agent 的自主推理與查詢能力，不要直接把這串中文傳給 `resolve_model.py` 查詢**。
+當使用者提出模糊或不精確的部署命令時（例如：「推薦一個適合目前資源且寫 code 最好的模型」、「幫我裝一個最近很紅的推理模型」等），你應透過執行 `scripts/recommend_model.py` 腳本來動態獲取最推薦的開源模型。
 
 請按照以下策略處理：
 
 ### 1. 智慧獲取當前資源預算 (VRAM Budget)
-先自動執行 `scripts/bootstrap_env.py`，並調用 AFSBox API 獲取叢集的預設 Preset 與可用 GPU 資源。評估當前主機所能承載的模型參數量上限：
-*   **單卡 16G-24G 顯存**：上限約為 7B~14B 模型。
-*   **單卡 40G-96G 顯存**：上限約為 32B~72B 輕量量化版模型。
-*   **大於 80G 顯存（或多卡並行）**：可承載 70B+ 等超大型模型。
+先自動執行 `scripts/bootstrap_env.py`，並調用 AFSBox API 獲取叢集的可用 GPU 資源與 Presets。評估當前叢集所能承載的最高顯存預算。
 
-### 2. 動態查詢最新排行榜 (Dynamic Leaderboard Query)
-由於開源模型更新極快，**切勿使用寫死的靜態推薦**。你必須使用 `search_web` 工具，在網路上動態搜尋當前最新排行榜，以獲取當下最強的開源模型列表：
-*   **程式碼生成與除錯 (Coding)**：使用 `search_web` 搜尋如 `"LiveCodeBench leaderboard top open source coding models"` 或 `"LMSYS coding leaderboard"`。
-*   **深度推理與數學邏輯 (Reasoning / Math)**：使用 `search_web` 搜尋如 `"LMSYS Chatbot Arena reasoning leaderboard"` 或 `"DeepSeek R1 distill models leaderboard"`。
-*   **通用對話與綜合任務 (General Chat)**：使用 `search_web` 搜尋如 `"LMSYS Chatbot Arena leaderboard latest top open source"`。
+### 2. 執行動態推薦工具 (Run Recommendation Tool)
+執行 `scripts/recommend_model.py` 來獲取推薦的模型。該工具結合了**線上 LMSYS Arena 排行榜 Elo 分數**與**動態版本代數遞增規則**，能自動且精確地對抗歷史累積下載量的偏差，推薦最適合的開源模型。
 
-從搜尋結果中，提取出目前排名前幾的**開源模型**，並根據上述第一步計算出的顯存預算 (VRAM Budget)，篩選出最適合目前顯存容量的參數尺寸（如 7B/8B、14B、32B 或 70B+）。
+```bash
+python3 scripts/recommend_model.py --task {coding|reasoning|general} --vram {VRAM_GB}
+```
+
+*   **參數說明**：
+    *   `--task`：可選為 `coding` (程式碼)、`reasoning` (推理)、`general` (通用)。若使用者未明示，可依據其描述來推導。
+    *   `--vram`：當前主機的可用顯存總量 (GB)。
+*   **腳本輸出範例**：
+    ```json
+    { "success": true, "hf_model_id": "Qwen/Qwen3.6-35B-A3B-FP8", "estimated_vram_gb": 39.0, "reason": "..." }
+    ```
 
 ### 3. 主動推薦並請使用者確認
-在畫面上向使用者詳細說明目前資源現況與排行榜依據，並給予明確的型號推薦。在使用者確認「yes」後，再以對應的精確 Hugging Face ID (例如 `Qwen/Qwen2.5-Coder-7B-Instruct`) 跳至 STEP 1 繼續執行部署。
+向使用者詳細說明目前資源現況（例如：可用顯存為 40GB），列出推薦工具選出的最優模型（例如：`Qwen/Qwen3.6-35B-A3B-FP8`）及推薦原因（`reason` 欄位）。在使用者確認「yes」或「確認部署」後，直接以該模型 ID 繼續執行 STEP 1 的部署。
 
 ---
 
