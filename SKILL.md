@@ -505,6 +505,20 @@ GGUF 倉庫通常包含多個檔案或多級目錄，因此必須找出具體的
 
 ---
 
+## 清理與刪除已部署的模型服務 (ModelServing)
+
+當使用者表達要「刪除」、「停止」、「下線」或「清理」某個 ModelServing 時（例如：「幫我把 qwen-qwen2-5-0-5b-serving 下線」），請執行以下腳本：
+
+```bash
+python3 scripts/delete_serving.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{SERVING_NAME}"
+```
+
+**腳本輸出 JSON：**
+* 成功刪除：`{ "deleted": true, "serving_name": "{SERVING_NAME}", "response": ... }`
+* 服務已不存在或已被刪除 (404)：`{ "deleted": true, "reason": "not_found", "serving_name": "{SERVING_NAME}" }`
+
+---
+
 ## 錯誤處理與常見部署異常排除 (Kubernetes 層級)
 
 - 每個 API 呼叫失敗都要顯示 HTTP status code + response body 摘要。
