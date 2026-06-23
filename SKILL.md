@@ -62,20 +62,13 @@ cat /tmp/bootstrap_env.json
 *   **單卡 40G-96G 顯存**：上限約為 32B~72B 輕量量化版模型。
 *   **大於 80G 顯存（或多卡並行）**：可承載 70B+ 等超大型模型。
 
-### 2. 參考業界公認排行榜 (Leaderboard Heuristics)
-根據以下業界公認排行（如 LiveCodeBench, LMSYS Chatbot Arena, MMLU），針對不同應用場景向使用者主動推薦最適模型：
+### 2. 動態查詢最新排行榜 (Dynamic Leaderboard Query)
+由於開源模型更新極快，**切勿使用寫死的靜態推薦**。你必須使用 `search_web` 工具，在網路上動態搜尋當前最新排行榜，以獲取當下最強的開源模型列表：
+*   **程式碼生成與除錯 (Coding)**：使用 `search_web` 搜尋如 `"LiveCodeBench leaderboard top open source coding models"` 或 `"LMSYS coding leaderboard"`。
+*   **深度推理與數學邏輯 (Reasoning / Math)**：使用 `search_web` 搜尋如 `"LMSYS Chatbot Arena reasoning leaderboard"` 或 `"DeepSeek R1 distill models leaderboard"`。
+*   **通用對話與綜合任務 (General Chat)**：使用 `search_web` 搜尋如 `"LMSYS Chatbot Arena leaderboard latest top open source"`。
 
-*   **程式碼生成與除錯 (Coding)**：
-    *   *顯存預算 < 24GB*：推薦 **Qwen2.5-Coder-7B-Instruct** (LiveCodeBench 10B 以下榜首)。
-    *   *顯存預算 24GB ~ 60GB*：推薦 **Qwen2.5-Coder-14B-Instruct** 或 **DeepSeek-Coder-V2-Lite-Instruct** (16B active)。
-    *   *顯存預算 > 60GB*：推薦 **Qwen2.5-Coder-32B-Instruct** 或 **Qwen2.5-Coder-72B-Instruct**。
-*   **深度推理與數學邏輯 (Reasoning / Math)**：
-    *   *顯存預算 < 24GB*：推薦 **DeepSeek-R1-Distill-Qwen-7B / 14B**。
-    *   *顯存預算 24GB ~ 60GB*：推薦 **DeepSeek-R1-Distill-Qwen-32B** 或 **Distill-Llama-70B**。
-    *   *顯存預算 > 80GB*：推薦 **DeepSeek-R1** (滿血版，需 TP>=8)。
-*   **通用對話與綜合任務 (General Chat)**：
-    *   *小尺寸*：推薦 **Llama-3.1-8B-Instruct** 或 **Qwen2.5-7B-Instruct**。
-    *   *大尺寸*：推薦 **Llama-3.3-70B-Instruct** 或 **Qwen2.5-72B-Instruct**。
+從搜尋結果中，提取出目前排名前幾的**開源模型**，並根據上述第一步計算出的顯存預算 (VRAM Budget)，篩選出最適合目前顯存容量的參數尺寸（如 7B/8B、14B、32B 或 70B+）。
 
 ### 3. 主動推薦並請使用者確認
 在畫面上向使用者詳細說明目前資源現況與排行榜依據，並給予明確的型號推薦。在使用者確認「yes」後，再以對應的精確 Hugging Face ID (例如 `Qwen/Qwen2.5-Coder-7B-Instruct`) 跳至 STEP 1 繼續執行部署。
