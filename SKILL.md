@@ -52,26 +52,24 @@ cat /tmp/bootstrap_env.json
 
 ## STEP 1｜解析模型 ID
 
-將使用者輸入對應到 HuggingFace model ID：
+執行以下腳本解析使用者輸入的模型名稱：
 
-| 使用者輸入 | HuggingFace model ID |
-|---|---|
-| gemma4 12b it / gemma 4 12b instruct | `google/gemma-4-12b-it` |
-| gemma4 12b | `google/gemma-4-12b-it` |
-| gemma4 27b | `google/gemma-4-27b-it` |
-| llama 3.1 8b | `meta-llama/Llama-3.1-8B-Instruct` |
-| llama 3.1 70b | `meta-llama/Llama-3.1-70B-Instruct` |
-| llama 3.3 70b | `meta-llama/Llama-3.3-70B-Instruct` |
-| qwen3 8b | `Qwen/Qwen3-8B-Instruct` |
-| qwen3 14b | `Qwen/Qwen3-14B-Instruct` |
-| qwen3 32b | `Qwen/Qwen3-32B-Instruct` |
-| deepseek r1 7b | `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` |
-| deepseek r1 | `deepseek-ai/DeepSeek-R1` |
-| mistral 7b | `mistralai/Mistral-7B-Instruct-v0.3` |
-| phi4 | `microsoft/phi-4` |
+```bash
+python3 scripts/resolve_model.py "{USER_INPUT}"
+```
 
-若輸入已是 `owner/model-name` 格式則直接使用。若無法確定，先詢問後再繼續。
+**腳本輸出格式與處理策略：**
+* 若 `exact=true`，直接使用 `hf_model_id` 並繼續 STEP 2：
+  ```json
+  { "success": true, "exact": true, "hf_model_id": "google/gemma-4-12b-it" }
+  ```
+* 若 `exact=false`，代表未匹配到本地別名，但從 HuggingFace 搜尋到了候選清單。此時請在對話中呈現此清單並詢問使用者選擇哪一個，選擇後再繼續：
+  ```json
+  { "success": true, "exact": false, "candidates": ["deepseek-ai/DeepSeek-V3", ...] }
+  ```
+* 若 `success=false`，提示搜尋失敗，並請使用者手動輸入正確的 HuggingFace Repo ID。
 
+確定好模型 ID 後，輸出：
 ```
 🚀 開始部署 {hf_model_id}
    Project: {project_id}
