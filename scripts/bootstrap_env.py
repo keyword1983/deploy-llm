@@ -103,7 +103,30 @@ def get_api_base_url(token):
     except Exception:
         pass
 
-    # Priority 4: try common sslip.io patterns from K8s ingress
+    # Priority 4: try common sslip.io patterns from K8s ingress (with Traefik NodePort support)
+    http_port = ""
+    https_port = ""
+    try:
+        proc = subprocess.run(
+            ["kubectl", "get", "svc", "-A", "-o", "json"],
+            capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode == 0:
+            svc_data = json.loads(proc.stdout)
+            for item in svc_data.get("items", []):
+                if "traefik" in item.get("metadata", {}).get("name", "").lower():
+                    for p in item.get("spec", {}).get("ports", []):
+                        if p.get("port") == 80:
+                            node_port = p.get("nodePort")
+                            if node_port:
+                                http_port = f":{node_port}"
+                        elif p.get("port") == 443:
+                            node_port = p.get("nodePort")
+                            if node_port:
+                                https_port = f":{node_port}"
+    except Exception:
+        pass
+
     try:
         proc = subprocess.run(
             ["kubectl", "get", "ingress", "-n", "afsbox-system", "-o", "json"],
@@ -115,12 +138,16 @@ def get_api_base_url(token):
                 for rule in item.get("spec", {}).get("rules", []):
                     host = rule.get("host", "")
                     if host:
-                        # Try https first, then http
-                        for scheme in ["https", "http"]:
-                            url = f"{scheme}://{host}"
-                            ok, _ = resolve_url(url, token)
-                            if ok:
-                                return url
+                        # Try https with nodeport first, then http with nodeport, then default
+                        url_https = f"https://{host}{https_port}"
+                        ok, _ = resolve_url(url_https, token)
+                        if ok:
+                            return url_https
+                            
+                        url_http = f"http://{host}{http_port}"
+                        ok, _ = resolve_url(url_http, token)
+                        if ok:
+                            return url_http
     except Exception:
         pass
 

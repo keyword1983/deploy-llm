@@ -27,6 +27,62 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from token_utils import refresh_token
 
 
+def is_cluster_arm() -> bool:
+    """Detect if the K8s cluster node is running on ARM64 architecture."""
+    try:
+        import subprocess
+        proc = subprocess.run(
+            ["kubectl", "get", "nodes", "-o", "jsonpath={.items[0].status.nodeInfo.architecture}"],
+            capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode == 0:
+            arch = proc.stdout.strip().lower()
+            return arch in ["arm64", "aarch64"]
+    except Exception:
+        pass
+    import platform
+    return platform.machine().lower() in ["aarch64", "arm64"]
+
+
+def get_arm_ngc_image(version_str_val: str) -> str:
+    """Map the requested vLLM version to an ARM64-compatible NVIDIA NGC image tag."""
+    if not version_str_val:
+        return "nvcr.io/nvidia/vllm:26.02-py3"
+    
+    parts = version_str_val.split('.')
+    if len(parts) >= 2:
+        try:
+            major = int(parts[0])
+            minor = int(parts[1])
+            if major == 0:
+                if minor <= 3:
+                    return "nvcr.io/nvidia/vllm:24.03-py3"
+                elif minor <= 5:
+                    return "nvcr.io/nvidia/vllm:24.07-py3"
+                elif minor == 6:
+                    patch = int(parts[2]) if len(parts) > 2 else 0
+                    if patch <= 2:
+                        return "nvcr.io/nvidia/vllm:24.09-py3"
+                    elif patch <= 4:
+                        return "nvcr.io/nvidia/vllm:24.12-py3"
+                    else:
+                        return "nvcr.io/nvidia/vllm:25.01-py3"
+                elif minor >= 7:
+                    return "nvcr.io/nvidia/vllm:26.02-py3"
+        except ValueError:
+            pass
+            
+    return "nvcr.io/nvidia/vllm:26.02-py3"
+
+
+def is_engine_arm_compatible(engine: dict) -> bool:
+    """Check if the existing engine image is compatible with ARM64."""
+    image = engine.get("values", {}).get("image", "").lower()
+    if not image:
+        return True  # Default to compatible if unspecified
+    return any(x in image for x in ["nvidia", "arm64", "aarch64"])
+
+
 def parse_version(engine: dict) -> tuple:
     name = engine.get('name', '')
     engine_id = engine.get('id', '')
@@ -85,10 +141,9 @@ def get_latest_vllm_version(api_base: str, token: str, engines: list) -> tuple:
 
 def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
     # 1. Detect hardware characteristics
-    import platform
     import subprocess
     
-    is_arm = platform.machine().lower() in ["aarch64", "arm64"]
+    is_arm = is_cluster_arm()
     is_blackwell = False
     
     try:
@@ -180,8 +235,7 @@ def try_bootstrap_engine(version_tuple: tuple, chart_name: str, chart_namespace:
     if spec_image:
         image = spec_image
     else:
-        import platform
-        is_arm = platform.machine().lower() in ["aarch64", "arm64"]
+        is_arm = is_cluster_arm()
         is_blackwell = False
         try:
             import subprocess
@@ -196,11 +250,13 @@ def try_bootstrap_engine(version_tuple: tuple, chart_name: str, chart_namespace:
         except Exception:
             pass
 
-        # Build image tag based on required version
-        if version_str_val:
+        # Build image tag based on required version and CPU architecture
+        if is_arm:
+            image = get_arm_ngc_image(version_str_val)
+        elif version_str_val:
             image = f"vllm/vllm-openai:v{version_str_val}"
         else:
-            image = "nvcr.io/nvidia/vllm:26.02-py3" if (is_arm or is_blackwell) else "vllm/vllm-openai:latest"
+            image = "nvcr.io/nvidia/vllm:26.02-py3" if is_blackwell else "vllm/vllm-openai:latest"
 
     # Reconstruct with private registry if available
     try:
@@ -376,13 +432,20 @@ def main():
         sys.stderr.flush()
         min_version = latest_stable
 
-    # Check if we have a compatible engine
+    # Check if we have a compatible engine (validating image compatibility for ARM)
+    is_arm = is_cluster_arm()
     compatible_engine = None
     if engines:
-        best = engines[0]
-        best_ver = parse_version(best)
-        if best_ver >= min_version:
-            compatible_engine = best
+        for eng in engines:
+            best_ver = parse_version(eng)
+            if best_ver >= min_version:
+                image_tag = detect_image_source(eng['id'], api_base, token)
+                if is_arm and not any(x in image_tag.lower() for x in ["nvidia", "arm64", "aarch64"]):
+                    sys.stderr.write(f"  ⚠️ Skipping engine {eng['id']} because resolved image {image_tag} is not ARM64-compatible.\n")
+                    sys.stderr.flush()
+                    continue
+                compatible_engine = eng
+                break
 
     # If no compatible engine exists, try to bootstrap a new one with the required version
     if not compatible_engine:
@@ -417,10 +480,15 @@ def main():
                     engines = [e for e in data.get('engines', []) if e.get('engine', {}).get('type') == 'vllm']
                     engines.sort(key=lambda e: parse_version(e), reverse=True)
                     if engines:
-                        best = engines[0]
-                        best_ver = parse_version(best)
-                        if best_ver >= min_version:
-                            compatible_engine = best
+                        for eng in engines:
+                            best_ver = parse_version(eng)
+                            if best_ver >= min_version:
+                                image_tag = detect_image_source(eng['id'], api_base, token)
+                                if is_arm and not any(x in image_tag.lower() for x in ["nvidia", "arm64", "aarch64"]):
+                                    continue
+                                compatible_engine = eng
+                                break
+                        if compatible_engine:
                             break
                 except Exception:
                     pass
