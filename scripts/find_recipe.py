@@ -114,8 +114,26 @@ def trace_ancestry(hf_id: str, visited: set | None = None) -> list:
     return chain
 
 
+def extract_version_token(name: str, family: str) -> str:
+    """Extract major/minor version suffix following the last occurrence of the family name (e.g. 2.5, 3, r1, v3)."""
+    name = name.lower()
+    idx = name.rfind(family.lower())
+    if idx == -1:
+        return ""
+    sub = name[idx + len(family):]
+    # Match version pattern like "2.5", "3.1", "3", etc.
+    m = re.match(r'^[-_]?(\d+(?:\.\d+)?)', sub)
+    if m:
+        return m.group(1)
+    # Match patterns like "r1", "v3"
+    m = re.match(r'^[-_]?(r\d+|v\d+)', sub)
+    if m:
+        return m.group(1)
+    return "" 
+
+
 def find_recipe_by_keywords(hf_id: str, recipe_db: list) -> dict | None:
-    """Level 3: Keyword matching in recipe DB"""
+    """Level 3: Keyword matching in recipe DB with float size parsing and generation mismatch protection"""
     families = ['qwen', 'gemma', 'llama', 'mistral', 'phi', 'yi', 'mixtral', 'deepseek', 'internlm']
     found_family = None
     for f in families:
@@ -125,9 +143,11 @@ def find_recipe_by_keywords(hf_id: str, recipe_db: list) -> dict | None:
     
     if not found_family:
         return None
-        
-    size_match = re.search(r'(\d+)[bB]', hf_id)
-    target_size = int(size_match.group(1)) if size_match else None
+
+    target_version = extract_version_token(hf_id, found_family)
+    
+    size_match = re.search(r'(\d+(?:\.\d+)?)[bB]', hf_id)
+    target_size = float(size_match.group(1)) if size_match else None
     
     best_match = None
     min_diff = float('inf')
@@ -138,11 +158,22 @@ def find_recipe_by_keywords(hf_id: str, recipe_db: list) -> dict | None:
         
         if found_family not in m_name and found_family not in m_label:
             continue
+
+        # Prevent generation mismatch (e.g. Qwen2.5 matching Qwen3 recipe)
+        m_version = extract_version_token(m_name, found_family) or extract_version_token(m_label, found_family)
+        if target_version != m_version:
+            continue
+
+        # Prevent VL / text-only mismatch
+        target_is_vl = 'vl' in hf_id.lower() or 'vision' in hf_id.lower()
+        m_is_vl = 'vl' in m_name or 'vl' in m_label or 'vision' in m_name or 'vision' in m_label
+        if target_is_vl != m_is_vl:
+            continue
             
-        m_size_match = re.search(r'(\d+)[bB]', m_name)
+        m_size_match = re.search(r'(\d+(?:\.\d+)?)[bB]', m_name)
         if m_size_match:
-            m_size = int(m_size_match.group(1))
-            diff = abs(m_size - target_size) if target_size else 9999
+            m_size = float(m_size_match.group(1))
+            diff = abs(m_size - target_size) if target_size is not None else 9999
             if diff < min_diff:
                 min_diff = diff
                 best_match = m

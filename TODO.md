@@ -32,14 +32,25 @@
 
 ### P1 — 穩定性（強烈建議修）
 
-- [ ] **D. 輪詢期間 Token 過期自動刷新**
+- [x] **D. 輪詢期間 Token 過期自動刷新**
   - 影響：`poll_download.py` 預設 30 分鐘，Keycloak token 常在中途過期導致 401 無限重試
   - 方案：偵測 HTTP 401 時重新呼叫 `bootstrap_env.py` 取得新 token
+  - 狀態：已建立 `token_utils.py` 作為共用模組，並在 `poll_download.py`、`poll_serving.py` 等所有連線腳本中引入進行 401 自動刷新與重試。
 
 - [x] **F. 部署後健康檢查 (Smoke Test)**
   - 影響：`poll_serving.py` 只檢查 `internalEndpoint` 有值就標記 READY，但模型可能載入失敗
   - 方案：找到 endpoint 後呼叫 `/v1/models` 確認模型名稱出現，或發一筆 `chat/completions` 測試請求
   - 狀態：已在 `poll_serving.py` 中整合 `/v1/models` 健康檢查，能智慧處理未就緒時的載入等待，並具備外部網絡無法連接時的自動 fallback 降級機制。
+
+- [x] **M. Model Info 解析失敗**
+  - 影響：當 `poll_download.py` 輸出 JSON 解析異常，或 AI 提取之 JSON 欄位遺失時，`calc_params.py` 算出的顯存預估可能為 0。
+  - 方案：為 `calc_params.py` 加上容錯設計，使其在 JSON 損壞或不齊全時，能直接作為 repo_name 字串傳入並呼叫 AFSBox API 自動獲取模型屬性。
+  - 狀態：已完成 `calc_params.py` 的容錯改造，即使傳入純字串 repo_name，亦可利用 cached token 回拉 API 模型規格。
+
+- [x] **N. Recipe 匹配不精確**
+  - 影響：對 sub-1B 模型（如 `Qwen2.5-0.5B`）進行模糊匹配時，因 regex 浮點數解析 Bug，將 `0.5B` 誤識為 `5B`，並進一步錯配到帶有 Qwen3 專用參數的 `Qwen3-4B` 模板上。
+  - 方案：修正為支援浮點數的 regex，並在模糊比對中加入「世代匹配（Generation Match）」以及「VL/Text 分流」防護機制。
+  - 狀態：已修改 `find_recipe.py`，現在 `0.5B` 可正確比對為 0.5 規格，且會過濾跨世代與 VL/Text 錯配，成功精準 fallback 至相容的 `Qwen2.5-32B` 模板（或推斷模式）。
 
 ### P2 — 維護性（建議修）
 

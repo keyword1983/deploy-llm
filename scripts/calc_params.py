@@ -29,6 +29,7 @@ Exit codes:
 import sys
 import json
 import math
+import os
 
 
 def parse_vram_bytes(s: str) -> float:
@@ -294,6 +295,11 @@ def main():
 
     try:
         model_info   = json.loads(sys.argv[1])
+    except json.JSONDecodeError:
+        # Treat as raw repo_name string
+        model_info = {"repo_name": sys.argv[1].strip("'\"")}
+
+    try:
         presets_data = json.loads(sys.argv[2])
         cap_data     = json.loads(sys.argv[3])
     except json.JSONDecodeError as e:
@@ -309,6 +315,42 @@ def main():
     context_len   = model_info.get('context_length') or 131072
     parameters    = model_info.get('parameters') or '0B'
     torch_dtype   = model_info.get('torch_dtype') or 'bfloat16'
+
+    # Try to fetch model_info from API if keys are missing but we have repo_name
+    repo_name = model_info.get('repo_name')
+    if (not req_vram or not kv_per_token) and repo_name:
+        api_base = os.environ.get("API_BASE_URL", "").rstrip("/")
+        token = os.environ.get("ACCESS_TOKEN", "")
+        project_id = os.environ.get("PROJECT_ID", "")
+        
+        # Fallback to bootstrap_env.json
+        if not api_base or not token or not project_id:
+            try:
+                with open("/tmp/bootstrap_env.json", "r") as f:
+                    boot = json.load(f)
+                    api_base = api_base or boot.get("api_base_url", "").rstrip("/")
+                    token = token or boot.get("access_token", "")
+                    project_id = project_id or boot.get("project_id", "")
+            except Exception:
+                pass
+                
+        if api_base and token and project_id:
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from token_utils import api_request
+                url = f"{api_base}/api/v1/models/projects/{project_id}/repositories/{repo_name}"
+                repo_data = api_request("GET", url, token)
+                api_model_info = repo_data.get("model_info") or {}
+                if api_model_info:
+                    req_vram = api_model_info.get('required_min_gpu_memory') or req_vram
+                    kv_per_token = api_model_info.get('kv_cache_memory_per_token') or kv_per_token
+                    context_len = api_model_info.get('context_length') or context_len
+                    parameters = api_model_info.get('parameters') or parameters
+                    torch_dtype = api_model_info.get('torch_dtype') or torch_dtype
+                    model_info.update(api_model_info)
+            except Exception as e:
+                sys.stderr.write(f"  ⚠️ Failed to fetch model_info from API: {e}\n")
+                sys.stderr.flush()
 
     # Fallback kv estimate if not available
     if not kv_per_token:
