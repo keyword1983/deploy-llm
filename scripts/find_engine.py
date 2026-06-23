@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-find_engine.py — Query afsbox API and return the latest compatible vLLM engine.
+find_engine.py — Query afsbox API and return/bootstrap the compatible vLLM engine.
 
 Usage:
   python3 find_engine.py <API_BASE_URL> <ACCESS_TOKEN> [MIN_VERSION]
@@ -11,7 +11,7 @@ Output (stdout):
 
 Exit codes:
   0 = success
-  1 = no vllm engine found or incompatible version
+  1 = no compatible vllm engine found and bootstrap failed
   2 = API request failed
 """
 import sys
@@ -30,17 +30,26 @@ from token_utils import refresh_token
 def parse_version(engine: dict) -> tuple:
     name = engine.get('name', '')
     engine_id = engine.get('id', '')
+    
     # Check if this is an NVIDIA Blackwell optimized engine
     if 'nvidia' in engine_id.lower() or 'nvidia' in name.lower():
         return (99, 0, 0)
-    # Parse from name
-    m = re.search(r'v(\d+\.\d+\.\d+)', name, re.IGNORECASE)
+        
+    # 1. Parse from name (extract version like '0.6.0' or 'v0.7.1')
+    m = re.search(r'(\d+\.\d+\.\d+)', name, re.IGNORECASE)
     if m:
         return tuple(int(x) for x in m.group(1).split('.'))
-    # Parse from id
-    m = re.search(r'v(\d+\.\d+\.\d+)', engine_id, re.IGNORECASE)
+        
+    # 2. Parse from id (supports both dot and dash formats, e.g. 'v0-6-0' or 'v0.6.0')
+    m = re.search(r'v(\d+)[-.](\d+)[-.](\d+)', engine_id, re.IGNORECASE)
     if m:
-        return tuple(int(x) for x in m.group(1).split('.'))
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        
+    # 3. Fallback: try looking for any three numbers separated by dash/dot in id
+    m = re.search(r'(\d+)[-.](\d+)[-.](\d+)', engine_id)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        
     return (0, 0, 0)
 
 
@@ -113,14 +122,11 @@ def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
                 default_val = image_q.get("default", "")
                 
                 if options:
-                    # If preferred_image is in options, use it
                     if preferred_image in options:
                         return preferred_image
                     
-                    # Try to find a matching option containing "vllm"
                     vllm_options = [opt for opt in options if "vllm" in opt.lower()]
                     if vllm_options:
-                        # Prefer the one matching hardware (nvidia/vllm vs vllm-openai)
                         if is_arm or is_blackwell:
                             nvidia_opts = [opt for opt in vllm_options if "nvidia" in opt.lower()]
                             if nvidia_opts:
@@ -130,8 +136,6 @@ def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
                             if openai_opts:
                                 return openai_opts[0]
                         return vllm_options[0]
-                    
-                    # Return the first option as fallback
                     return options[0]
                 
                 if default_val:
@@ -143,7 +147,7 @@ def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
     return preferred_image
 
 
-def try_bootstrap_engine() -> bool:
+def try_bootstrap_engine(version_tuple: tuple, chart_name: str, chart_namespace: str) -> bool:
     import subprocess
     try:
         # Check if kubectl is available
@@ -151,8 +155,9 @@ def try_bootstrap_engine() -> bool:
     except Exception:
         return False  # No kubectl, cannot auto-bootstrap
 
-    # Auto detect image tag using default fallback since we don't have token during boot
-    # but we can detect based on hardware
+    version_str_val = ".".join(str(x) for x in version_tuple) if version_tuple != (0, 0, 0) else ""
+
+    # 1. Determine image tag based on hardware and version
     import platform
     is_arm = platform.machine().lower() in ["aarch64", "arm64"]
     is_blackwell = False
@@ -168,10 +173,14 @@ def try_bootstrap_engine() -> bool:
     except Exception:
         pass
 
-    if is_arm or is_blackwell:
-        image = "nvcr.io/nvidia/vllm:26.02-py3"
+    # Build image tag based on required version
+    if version_str_val:
+        image = f"vllm/vllm-openai:v{version_str_val}"
     else:
-        image = "vllm/vllm-openai:latest"
+        if is_arm or is_blackwell:
+            image = "nvcr.io/nvidia/vllm:26.02-py3"
+        else:
+            image = "vllm/vllm-openai:latest"
 
     # Reconstruct with private registry if available
     try:
@@ -181,28 +190,36 @@ def try_bootstrap_engine() -> bool:
             image_path = proc.stdout.strip()
             parts = image_path.split('/')
             if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
-                if is_arm or is_blackwell:
-                    image = f"{parts[0]}/nvidia/vllm:26.02-py3"
+                if version_str_val:
+                    image = f"{parts[0]}/afsbox/vllm-openai:v{version_str_val}"
                 else:
-                    image = f"{parts[0]}/afsbox/vllm-openai:latest"
+                    if is_arm or is_blackwell:
+                        image = f"{parts[0]}/nvidia/vllm:26.02-py3"
+                    else:
+                        image = f"{parts[0]}/afsbox/vllm-openai:latest"
     except Exception:
         pass
+
+    # Use DNS safe name: e.g. auto-vllm-engine-v0-7-1 or auto-vllm-engine-latest
+    suffix = f"v{version_str_val.replace('.', '-')}" if version_str_val else "latest"
+    engine_name = f"auto-vllm-engine-{suffix}"
+    display_name = f"Auto vLLM Engine {version_str_val}" if version_str_val else "Auto vLLM Engine Latest"
 
     # Generate ModelEngine YAML
     yaml_content = f"""apiVersion: afsbox.asus.com/v1beta1
 kind: ModelEngine
 metadata:
-  name: auto-vllm-engine
+  name: {engine_name}
   namespace: afsbox-system
 spec:
-  displayName: "Auto vLLM Engine"
+  displayName: "{display_name}"
   engine:
     type: vllm
     servicePort: 8000
   modelType: llm
   chartRef:
-    name: inference-engine
-    namespace: afsbox-system
+    name: {chart_name}
+    namespace: {chart_namespace}
   values:
     image: "{image}"
     shm:
@@ -255,7 +272,9 @@ spec:
             timeout=10
         )
         return True
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"  ⚠️ Failed to apply ModelEngine via kubectl: {e}\n")
+        sys.stderr.flush()
         return False
 
 
@@ -303,40 +322,59 @@ def main():
     # Filter vllm engines
     engines = [e for e in data.get('engines', []) if e.get('engine', {}).get('type') == 'vllm']
 
-    if not engines:
-        # Attempt to auto bootstrap ModelEngine
-        if try_bootstrap_engine():
-            # Retry API call once to fetch the newly created engine
-            try:
-                import time
-                time.sleep(2)
-                with urllib.request.urlopen(req) as resp:
-                    data = json.loads(resp.read())
-                engines = [e for e in data.get('engines', []) if e.get('engine', {}).get('type') == 'vllm']
-            except Exception:
-                pass
-
-    if not engines:
-        print(
-            'ERROR: no vllm engine template found.\n'
-            'Possible causes:\n'
-            '  1. Admin has not created a vLLM Engine Template yet.\n'
-            '     Go to: Admin > Models > Templates > + New Template\n'
-            '     Set engine.type = "vllm" and select the installed vLLM Helm chart.\n'
-            '  2. The vLLM Helm chart has not been installed to the cluster yet.\n'
-            '     Install the chart first, then create the Engine Template.'
-        )
-        sys.exit(1)
-
-    # Sort by version descending, pick latest
+    # Sort by version descending
     engines.sort(key=lambda e: parse_version(e), reverse=True)
-    best = engines[0]
-    best_ver = parse_version(best)
 
-    # Check min version compatibility
-    if best_ver < min_version:
-        print(f'ERROR: latest engine version {version_str(best_ver)} < required {version_str(min_version)}')
+    # Check if we have a compatible engine
+    compatible_engine = None
+    if engines:
+        best = engines[0]
+        best_ver = parse_version(best)
+        if best_ver >= min_version:
+            compatible_engine = best
+
+    # If no compatible engine exists, try to bootstrap a new one with the required version
+    if not compatible_engine:
+        sys.stderr.write(f"  ⏳ No compatible engine version >= {version_str(min_version)} found. Attempting to bootstrap a new ModelEngine...\n")
+        sys.stderr.flush()
+
+        # Copy chartRef from existing engines if available
+        chart_name = "inference-engine"
+        chart_namespace = "afsbox-system"
+        for e in engines:
+            ref = e.get("chartRef", {})
+            if ref.get("name"):
+                chart_name = ref.get("name")
+                chart_namespace = ref.get("namespace") or chart_namespace
+                break
+
+        if try_bootstrap_engine(min_version, chart_name, chart_namespace):
+            # Retry API call to fetch the newly created engine (polling up to 5 times, 10s total)
+            for attempt in range(5):
+                try:
+                    import time
+                    time.sleep(2)
+                    sys.stderr.write(f"  ⏳ Retrying API check (attempt {attempt + 1}/5)...\n")
+                    sys.stderr.flush()
+                    with urllib.request.urlopen(req) as resp:
+                        data = json.loads(resp.read())
+                    engines = [e for e in data.get('engines', []) if e.get('engine', {}).get('type') == 'vllm']
+                    engines.sort(key=lambda e: parse_version(e), reverse=True)
+                    if engines:
+                        best = engines[0]
+                        best_ver = parse_version(best)
+                        if best_ver >= min_version:
+                            compatible_engine = best
+                            break
+                except Exception:
+                    pass
+
+    if not compatible_engine:
+        print(f'ERROR: latest engine version {version_str(best_ver) if engines else "none"} < required {version_str(min_version)} and auto-bootstrap failed')
         sys.exit(1)
+
+    best = compatible_engine
+    best_ver = parse_version(best)
 
     # Dynamically detect optimal image tag based on allowed options in this specific engine
     image_tag = detect_image_source(best['id'], api_base, token)
