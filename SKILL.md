@@ -145,10 +145,12 @@ python3 scripts/resolve_model.py "{USER_INPUT}"
 
 !`python3 scripts/check_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}"`
 
-腳本輸出 JSON：`{ exists, repo_name, phase, slug }`
+腳本輸出 JSON：`{ exists, repo_name, phase, slug, gated, private }`
 
 - 若 `exists=true` → 記錄 `REPO_NAME={repo_name}`，**跳至 STEP 5**
-- 若 `exists=false` → 記錄 `REPO_NAME={slug}`，繼續 4b
+- 若 `exists=false` → 記錄 `REPO_NAME={slug}`，並檢查是否 `gated` 或 `private` 為 `true`：
+  *   **若為 gated 或 private**：在繼續下一步之前，務必向使用者發出警告，提示其確認 HuggingFace 登入認證或專屬 Token 設定（例如，檢查是否已設定 `HF_CREDENTIAL_ID`），以確保有權存取下載該模型。然後繼續 4b。
+  *   **若為非 gated / private**：直接繼續 4b。
 
 **4b. 建立 ModelRepository 並觸發下載：**
 

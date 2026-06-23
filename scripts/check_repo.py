@@ -35,6 +35,25 @@ def make_slug(hf_model_id: str) -> str:
     return hf_model_id.replace('/', '-').lower()[:40].rstrip('-')
 
 
+def check_hf_gated(hf_model_id: str) -> dict:
+    url = f'https://huggingface.co/api/models/{hf_model_id}'
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            gated = data.get('gated')
+            is_gated = bool(gated) and gated != False
+            return {'gated': is_gated, 'private': False, 'valid': True}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {'gated': True, 'private': True, 'valid': True}
+        elif e.code == 404:
+            return {'gated': False, 'private': True, 'valid': False}
+    except Exception:
+        pass
+    return {'gated': False, 'private': False, 'valid': True}
+
+
 def main():
     if len(sys.argv) < 5:
         print('ERROR: usage: check_repo.py <API_BASE_URL> <ACCESS_TOKEN> <PROJECT_ID> <HF_MODEL_ID>')
@@ -93,13 +112,18 @@ def main():
             'repo_name': found['name'],
             'phase': found.get('phase', ''),
             'slug': slug,
+            'gated': False,
+            'private': False,
         }))
     else:
+        hf_status = check_hf_gated(hf_model_id)
         print(json.dumps({
             'exists': False,
             'repo_name': slug,
             'phase': found.get('phase', '') if found else '',
             'slug': slug,
+            'gated': hf_status.get('gated', False),
+            'private': hf_status.get('private', False),
         }))
     sys.exit(0)
 
