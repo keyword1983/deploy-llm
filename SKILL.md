@@ -93,14 +93,9 @@ cat /tmp/bootstrap_env.json
 
 > 💡 **自動自我修復 (Self-healing Engine)：**
 > 若 `find_engine.py` 報錯找不到 vLLM Engine：
-> 1. 自動檢查工作區本地的 `/home/asus/frank/afsbox/vllm-engine-nvidia.yaml` 是否存在。
-> 2. 若存在且環境有 `kubectl` 權限，詢問使用者：「*檢測到系統中沒有 vLLM Engine，是否自動套用本地 Engine 範本建立？*」。
-> 3. 使用者確認後，執行指令建立：
->    ```bash
->    kubectl apply -f /home/asus/frank/afsbox/vllm-engine-nvidia.yaml
->    ```
->    建立成功後，重新執行 `find_engine.py`。
-> 4. 若無 K8s 權限，則在對話中以文字詳細引導使用者登入 Portal 至 **Admin > Models > Templates** 手動建立 vLLM Engine 範本。
+> `find_engine.py` 內部已具有自動自我修復機制，會自動透過 `kubectl` 套用內嵌的 ModelEngine 範本並動態探索適配的 Docker Image 來建立 `auto-vllm-engine`。
+> 1. 若環境有 `kubectl` 權限，腳本會自動完成建立。
+> 2. 若因缺乏權限等原因自動建立失敗，請在對話中詳細引導使用者登入 Portal 至 **Admin > Models > Templates** 手動建立 vLLM Engine 範本。
 
 記錄 `ENGINE_ID`、`ENGINE_NAME`、`ENGINE_VERSION`、`CHART_REF_NAME`。
 
@@ -216,14 +211,9 @@ Authorization: Bearer {ACCESS_TOKEN}
 
 > 💡 **自動自我修復 (Self-healing Preset)：**
 > 若 `calc_params.py` 報錯 `no feasible preset found` 或 preset 列表為空：
-> 1. 自動檢查工作區本地的 `/home/asus/frank/afsbox/gb10-preset.yaml` 是否存在。
-> 2. 若存在且環境有 `kubectl` 權限，詢問使用者：「*檢測到系統中沒有可用的 ResourcePreset，是否自動套用本地 Preset 範本建立？*」。
-> 3. 使用者確認後，執行指令建立：
->    ```bash
->    kubectl apply -f /home/asus/frank/afsbox/gb10-preset.yaml
->    ```
->    建立成功後，重新執行參數計算。
-> 4. 若無 K8s 權限，則引導使用者登入 Portal 至 **Admin > Resources > Presets** 手動新增適合模型大小的 GPU Preset（例如 GB10 96Gi 規格）。
+> `calc_params.py` 內部已具有自動自我修復機制，會自動偵測主機 GPU 規格與記憶體限制，並動態產生對應的 `ResourcePreset`。
+> 1. 若環境有 `kubectl` 權限，腳本會自動完成建立並自動重新評估。
+> 2. 若無 K8s 權限導致無法自動建立，則在對話中引導使用者登入 Portal 至 **Admin > Resources > Presets** 手動新增適合當前 GPU 規格與模型大小的 GPU Preset（例如 GB10 96Gi 規格，並配合單卡多虛擬卡調度限制進行設定）。
 > ⚠️ **vGPU 實體卡調度限制注意**：
 > 在只有 1 張實體 GPU 的單節點/單卡環境中，排程器不支援將同一個容器的複數個虛擬卡分配在同一個實體 GPU 上（會報 `NodeInsufficientDevice`）。因此大模型（如 72B）**不能**選用 `gpu: 4` 的多虛擬卡 Preset，而應選用 `gpu: 1` 但 `sharing.nvidia.com/gpumem` 大顯存配置的 Preset（例如 `auto-preset-nvidia-gb10-1x-large`，配置 80 GiB 顯存）。`calc_params.py` 已對此自動優化，確保只推薦符合實體卡數上限的 Preset。
 
