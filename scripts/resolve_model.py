@@ -20,7 +20,7 @@ import urllib.parse
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
-# Local aliases dictionary mapping common inputs to official HF model IDs
+# Static aliases for instant offline mapping
 ALIASES = {
     "gemma4 12b it": "google/gemma-4-12b-it",
     "gemma4 12b instruct": "google/gemma-4-12b-it",
@@ -59,13 +59,12 @@ ALIASES = {
 def search_hf_hub(query: str, limit: int = 5) -> list:
     """Query Hugging Face API to find models matching the query string."""
     encoded_query = urllib.parse.quote(query)
+    # Filter for text-generation/conversational models to reduce noise
     url = f"https://huggingface.co/api/models?search={encoded_query}&limit={limit}&sort=downloads"
     try:
         req = urllib.request.Request(
             url,
-            headers={
-                "User-Agent": "afsbox-deploy/1.0"
-            }
+            headers={"User-Agent": "afsbox-deploy/1.0"}
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -88,17 +87,11 @@ def main():
         print(json.dumps({"success": True, "exact": True, "hf_model_id": user_input}))
         sys.exit(0)
 
-    # 2. Check local aliases (case insensitive, whitespace stripped)
+    # 2. Check local aliases (case insensitive, whitespace normalized)
     normalized = " ".join(user_input.lower().split())
     if normalized in ALIASES:
         print(json.dumps({"success": True, "exact": True, "hf_model_id": ALIASES[normalized]}))
         sys.exit(0)
-
-    # Partial match helper in local aliases keys
-    for alias_key, full_id in ALIASES.items():
-        if normalized == alias_key:
-            print(json.dumps({"success": True, "exact": True, "hf_model_id": full_id}))
-            sys.exit(0)
 
     # 3. Fallback: Search on HuggingFace Hub
     sys.stderr.write(f"  🔍 '{user_input}' not found in local aliases. Searching on HuggingFace Hub...\n")

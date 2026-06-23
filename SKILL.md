@@ -63,10 +63,15 @@ python3 scripts/resolve_model.py "{USER_INPUT}"
   ```json
   { "success": true, "exact": true, "hf_model_id": "google/gemma-4-12b-it" }
   ```
-* 若 `exact=false`，代表未匹配到本地別名，但從 HuggingFace 搜尋到了候選清單。此時請在對話中呈現此清單並詢問使用者選擇哪一個，選擇後再繼續：
+* 若 `exact=false`，代表未匹配到本地別名，但從 HuggingFace 搜尋到了候選清單：
   ```json
-  { "success": true, "exact": false, "candidates": ["deepseek-ai/DeepSeek-V3", ...] }
+  { "success": true, "exact": false, "candidates": ["google/gemma-2-9b-it", "google/gemma-2-9b", "bartowski/gemma-2-9b-it-GGUF", ...] }
   ```
+  **【重要：Agent 語意篩選策略】**
+  身為 AI 助理，你應該**直接發揮語意理解能力，在背景分析這份候選清單**。
+  - 若清單中存在非常明顯的官方/原廠 Instruct 預設模型（通常是知名作者如 `google/`, `meta-llama/`, `Qwen/`, `deepseek-ai/`, `microsoft/`，且含有 `-it` 或 `-Instruct` 結尾），**直接主動為使用者選定該最優 ID**，直接在對話中告知，並繼續部署，不需打擾使用者。
+    *例如：使用者輸入 `gemma 2 9b`，候選有 `google/gemma-2-9b-it`，直接選定它並告知使用者，不需列出清單詢問。*
+  - 只有在多個候選極度模糊（置信度不足）時，才在對話中列出清單請使用者挑選。
 * 若 `success=false`，提示搜尋失敗，並請使用者手動輸入正確的 HuggingFace Repo ID。
 
 確定好模型 ID 後，輸出：
