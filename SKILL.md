@@ -50,6 +50,38 @@ cat /tmp/bootstrap_env.json
 
 ---
 
+## 智慧推薦與模糊指令解析策略 (Intelligent Recommendation)
+
+當使用者提出模糊或不精確的部署命令時（例如：「推薦一個適合目前資源且寫 code 最好的模型」、「幫我裝一個最近很紅的推理模型」等），**你應發揮 Agent 的自主推理與查詢能力，不要直接把這串中文傳給 `resolve_model.py` 查詢**。
+
+請按照以下策略處理：
+
+### 1. 智慧獲取當前資源預算 (VRAM Budget)
+先自動執行 `scripts/bootstrap_env.py`，並調用 AFSBox API 獲取叢集的預設 Preset 與可用 GPU 資源。評估當前主機所能承載的模型參數量上限：
+*   **單卡 16G-24G 顯存**：上限約為 7B~14B 模型。
+*   **單卡 40G-96G 顯存**：上限約為 32B~72B 輕量量化版模型。
+*   **大於 80G 顯存（或多卡並行）**：可承載 70B+ 等超大型模型。
+
+### 2. 參考業界公認排行榜 (Leaderboard Heuristics)
+根據以下業界公認排行（如 LiveCodeBench, LMSYS Chatbot Arena, MMLU），針對不同應用場景向使用者主動推薦最適模型：
+
+*   **程式碼生成與除錯 (Coding)**：
+    *   *顯存預算 < 24GB*：推薦 **Qwen2.5-Coder-7B-Instruct** (LiveCodeBench 10B 以下榜首)。
+    *   *顯存預算 24GB ~ 60GB*：推薦 **Qwen2.5-Coder-14B-Instruct** 或 **DeepSeek-Coder-V2-Lite-Instruct** (16B active)。
+    *   *顯存預算 > 60GB*：推薦 **Qwen2.5-Coder-32B-Instruct** 或 **Qwen2.5-Coder-72B-Instruct**。
+*   **深度推理與數學邏輯 (Reasoning / Math)**：
+    *   *顯存預算 < 24GB*：推薦 **DeepSeek-R1-Distill-Qwen-7B / 14B**。
+    *   *顯存預算 24GB ~ 60GB*：推薦 **DeepSeek-R1-Distill-Qwen-32B** 或 **Distill-Llama-70B**。
+    *   *顯存預算 > 80GB*：推薦 **DeepSeek-R1** (滿血版，需 TP>=8)。
+*   **通用對話與綜合任務 (General Chat)**：
+    *   *小尺寸*：推薦 **Llama-3.1-8B-Instruct** 或 **Qwen2.5-7B-Instruct**。
+    *   *大尺寸*：推薦 **Llama-3.3-70B-Instruct** 或 **Qwen2.5-72B-Instruct**。
+
+### 3. 主動推薦並請使用者確認
+在畫面上向使用者詳細說明目前資源現況與排行榜依據，並給予明確的型號推薦。在使用者確認「yes」後，再以對應的精確 Hugging Face ID (例如 `Qwen/Qwen2.5-Coder-7B-Instruct`) 跳至 STEP 1 繼續執行部署。
+
+---
+
 ## STEP 1｜解析模型 ID
 
 執行以下腳本解析使用者輸入的模型名稱：
