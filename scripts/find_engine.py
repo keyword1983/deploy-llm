@@ -3,7 +3,7 @@
 find_engine.py — Query afsbox API and return/bootstrap the compatible vLLM engine.
 
 Usage:
-  python3 find_engine.py <API_BASE_URL> <ACCESS_TOKEN> [MIN_VERSION]
+  python3 find_engine.py <API_BASE_URL> <ACCESS_TOKEN> [MIN_VERSION] [DOCKER_IMAGE]
 
 Output (stdout):
   JSON: { id, name, version, chartRef, image }
@@ -55,6 +55,32 @@ def parse_version(engine: dict) -> tuple:
 
 def version_str(t: tuple) -> str:
     return '.'.join(str(x) for x in t)
+
+
+def get_latest_vllm_version(api_base: str, token: str, engines: list) -> tuple:
+    """Dynamically determine the latest stable release tag of vLLM."""
+    # 1. Fetch from GitHub Releases API
+    url = 'https://api.github.com/repos/vllm-project/vllm/releases/latest'
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            tag = data.get('tag_name', '').lstrip('v')
+            m = re.match(r'^(\d+)\.(\d+)\.(\d+)', tag)
+            if m:
+                return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except Exception:
+        pass
+
+    # 2. Offline Fallback: Extract from maximum version of existing engines in cluster
+    if engines:
+        versions = [parse_version(e) for e in engines]
+        valid_versions = [v for v in versions if v != (99, 0, 0) and v != (0, 0, 0)]
+        if valid_versions:
+            return max(valid_versions)
+
+    # 3. Ultimate Fallback
+    return (0, 23, 0)
 
 
 def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
@@ -147,145 +173,161 @@ def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
     return preferred_image
 
 
-def try_bootstrap_engine(version_tuple: tuple, chart_name: str, chart_namespace: str) -> bool:
-    import subprocess
-    try:
-        # Check if kubectl is available
-        subprocess.run(["kubectl", "version", "--client"], capture_output=True, check=True, timeout=5)
-    except Exception:
-        return False  # No kubectl, cannot auto-bootstrap
-
+def try_bootstrap_engine(version_tuple: tuple, chart_name: str, chart_namespace: str, api_base: str, token: str, spec_image: str = None) -> bool:
     version_str_val = ".".join(str(x) for x in version_tuple) if version_tuple != (0, 0, 0) else ""
 
     # 1. Determine image tag based on hardware and version
-    import platform
-    is_arm = platform.machine().lower() in ["aarch64", "arm64"]
-    is_blackwell = False
-    try:
-        proc = subprocess.run(
-            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5
-        )
-        if proc.returncode == 0:
-            gpu_name = proc.stdout.strip().lower()
-            if any(x in gpu_name for x in ["gb10", "gb200", "b200", "blackwell"]):
-                is_blackwell = True
-    except Exception:
-        pass
-
-    # Build image tag based on required version
-    if version_str_val:
-        image = f"vllm/vllm-openai:v{version_str_val}"
+    if spec_image:
+        image = spec_image
     else:
-        if is_arm or is_blackwell:
-            image = "nvcr.io/nvidia/vllm:26.02-py3"
+        import platform
+        is_arm = platform.machine().lower() in ["aarch64", "arm64"]
+        is_blackwell = False
+        try:
+            import subprocess
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5
+            )
+            if proc.returncode == 0:
+                gpu_name = proc.stdout.strip().lower()
+                if any(x in gpu_name for x in ["gb10", "gb200", "b200", "blackwell"]):
+                    is_blackwell = True
+        except Exception:
+            pass
+
+        # Build image tag based on required version
+        if version_str_val:
+            image = f"vllm/vllm-openai:v{version_str_val}"
         else:
-            image = "vllm/vllm-openai:latest"
+            image = "nvcr.io/nvidia/vllm:26.02-py3" if (is_arm or is_blackwell) else "vllm/vllm-openai:latest"
 
     # Reconstruct with private registry if available
     try:
+        import subprocess
         cmd = ["kubectl", "get", "deployment", "afsbox-controller", "-n", "afsbox-system", "-o", "jsonpath={.spec.template.spec.containers[0].image}"]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if proc.returncode == 0:
             image_path = proc.stdout.strip()
             parts = image_path.split('/')
             if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
-                if version_str_val:
-                    image = f"{parts[0]}/afsbox/vllm-openai:v{version_str_val}"
-                else:
-                    if is_arm or is_blackwell:
-                        image = f"{parts[0]}/nvidia/vllm:26.02-py3"
+                if ":" in image:
+                    base_name = image.split(":")[0].split("/")[-1]
+                    tag_name = image.split(":")[-1]
+                    if "vllm" in base_name:
+                        image = f"{parts[0]}/afsbox/{base_name}:{tag_name}"
                     else:
-                        image = f"{parts[0]}/afsbox/vllm-openai:latest"
+                        image = f"{parts[0]}/nvidia/{base_name}:{tag_name}"
+                else:
+                    image = f"{parts[0]}/afsbox/vllm-openai:latest"
     except Exception:
         pass
 
-    # Use DNS safe name: e.g. auto-vllm-engine-v0-7-1 or auto-vllm-engine-latest
-    suffix = f"v{version_str_val.replace('.', '-')}" if version_str_val else "latest"
-    engine_name = f"auto-vllm-engine-{suffix}"
-    display_name = f"Auto vLLM Engine {version_str_val}" if version_str_val else "Auto vLLM Engine Latest"
+    # Build unique distinctive display name
+    if spec_image and ":" in spec_image:
+        tag = spec_image.split(":")[-1]
+        display_name = f"vLLM Auto Engine ({tag})"
+    else:
+        display_name = f"vLLM Auto Engine (v{version_str_val})" if version_str_val else "vLLM Auto Engine (Latest)"
 
-    # Generate ModelEngine YAML
-    yaml_content = f"""apiVersion: afsbox.asus.com/v1beta1
-kind: ModelEngine
-metadata:
-  name: {engine_name}
-  namespace: afsbox-system
-spec:
-  displayName: "{display_name}"
-  engine:
-    type: vllm
-    servicePort: 8000
-  modelType: llm
-  chartRef:
-    name: {chart_name}
-    namespace: {chart_namespace}
-  values:
-    image: "{image}"
-    shm:
-      enabled: true
-      size: 12Gi
-  additionalQuestions:
-    - variable: values.image
-      type: reference_image
-      label: "Container Image"
-      description: "選擇 engine 的容器映像"
-      group: "BasicSetting"
-      required: true
-      editable: true
-      options:
-        - "{image}"
-    - variable: tensorParallelSize
-      type: integer
-      label: "Tensor Parallel Size"
-      required: false
-      default: 1
-    - variable: maxModelLen
-      type: integer
-      label: "Max Model Length"
-      required: false
-      default: 2048
-    - variable: gpuMemoryUtilization
-      type: float
-      label: "GPU Memory Utilization"
-      required: false
-      default: 0.9
-    - variable: maxNumSeqs
-      type: integer
-      label: "Max Num Seqs"
-      required: false
-      default: 64
-    - variable: dtype
-      type: string
-      label: "Data Type"
-      required: false
-      default: "bfloat16"
-"""
+    # 2. Build the API payload body for creating the ModelEngine
+    body = {
+        "name": display_name,
+        "engine": {
+            "type": "vllm",
+            "servicePort": 8000
+        },
+        "modelType": "llm",
+        "chartRef": {
+            "name": chart_name,
+            "namespace": chart_namespace
+        },
+        "values": {
+            "image": image,
+            "shm": {
+                "enabled": True,
+                "size": "12Gi"
+            }
+        },
+        "additionalQuestions": [
+            {
+                "variable": "values.image",
+                "type": "reference_image",
+                "label": "Container Image",
+                "description": "選擇 engine 的容器映像",
+                "group": "BasicSetting",
+                "required": True,
+                "editable": True,
+                "options": [image]
+            },
+            {
+                "variable": "tensorParallelSize",
+                "type": "integer",
+                "label": "Tensor Parallel Size",
+                "required": False,
+                "default": 1
+            },
+            {
+                "variable": "maxModelLen",
+                "type": "integer",
+                "label": "Max Model Length",
+                "required": False,
+                "default": 2048
+            },
+            {
+                "variable": "gpuMemoryUtilization",
+                "type": "float",
+                "label": "GPU Memory Utilization",
+                "required": False,
+                "default": 0.9
+            },
+            {
+                "variable": "maxNumSeqs",
+                "type": "integer",
+                "label": "Max Num Seqs",
+                "required": False,
+                "default": 64
+            },
+            {
+                "variable": "dtype",
+                "type": "string",
+                "label": "Data Type",
+                "required": False,
+                "default": "bfloat16"
+            }
+        ]
+    }
+
+    # 3. Call the AFSBox ModelEngine Create API
+    url = f"{api_base}/api/v1/models/engines"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json',
+        },
+        method='POST'
+    )
+    
     try:
-        # Apply YAML via kubectl
-        subprocess.run(
-            ["kubectl", "apply", "-f", "-"],
-            input=yaml_content,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10
-        )
-        return True
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return True
     except Exception as e:
-        sys.stderr.write(f"  ⚠️ Failed to apply ModelEngine via kubectl: {e}\n")
+        sys.stderr.write(f"  ⚠️ Failed to create ModelEngine via API: {e}\n")
         sys.stderr.flush()
         return False
 
 
 def main():
     if len(sys.argv) < 3:
-        print('ERROR: usage: find_engine.py <API_BASE_URL> <ACCESS_TOKEN> [MIN_VERSION]')
+        print('ERROR: usage: find_engine.py <API_BASE_URL> <ACCESS_TOKEN> [MIN_VERSION] [DOCKER_IMAGE]')
         sys.exit(1)
 
     api_base = sys.argv[1].rstrip('/')
     token = sys.argv[2]
     min_version = tuple(int(x) for x in sys.argv[3].split('.')) if len(sys.argv) > 3 else (0, 0, 0)
+    spec_image = sys.argv[4] if len(sys.argv) > 4 else None
 
     url = f'{api_base}/api/v1/models/engines'
     req = urllib.request.Request(url, headers={
@@ -325,6 +367,15 @@ def main():
     # Sort by version descending
     engines.sort(key=lambda e: parse_version(e), reverse=True)
 
+    # Dynamically resolve the latest official stable version of vLLM
+    latest_stable = get_latest_vllm_version(api_base, token, engines)
+
+    # Enforce that the requested version does not exceed the current latest official vLLM version
+    if min_version > latest_stable:
+        sys.stderr.write(f"  ⚠️ Requested min_version {version_str(min_version)} exceeds latest official stable vLLM version {version_str(latest_stable)}. Capping to {version_str(latest_stable)}.\n")
+        sys.stderr.flush()
+        min_version = latest_stable
+
     # Check if we have a compatible engine
     compatible_engine = None
     if engines:
@@ -335,7 +386,12 @@ def main():
 
     # If no compatible engine exists, try to bootstrap a new one with the required version
     if not compatible_engine:
-        sys.stderr.write(f"  ⏳ No compatible engine version >= {version_str(min_version)} found. Attempting to bootstrap a new ModelEngine...\n")
+        # Since min_version has already been capped at latest_stable, bootstrap_version is simply latest_stable
+        bootstrap_version = latest_stable
+
+        sys.stderr.write(f"  ⏳ No compatible engine version >= {version_str(min_version)} found.\n"
+                         f"  ⏳ Resolved latest stable version: {version_str(latest_stable)}\n"
+                         f"  ⏳ Attempting to bootstrap a new ModelEngine via API (version: {version_str(bootstrap_version)})...\n")
         sys.stderr.flush()
 
         # Copy chartRef from existing engines if available
@@ -348,7 +404,7 @@ def main():
                 chart_namespace = ref.get("namespace") or chart_namespace
                 break
 
-        if try_bootstrap_engine(min_version, chart_name, chart_namespace):
+        if try_bootstrap_engine(bootstrap_version, chart_name, chart_namespace, api_base, token, spec_image):
             # Retry API call to fetch the newly created engine (polling up to 5 times, 10s total)
             for attempt in range(5):
                 try:

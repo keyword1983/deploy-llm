@@ -53,10 +53,8 @@ def get_base_models(hf_id: str) -> list:
     bases = []
     for t in tags:
         if t.startswith('base_model:'):
-            # Strip 'quantized:' or 'finetuned:' prefixes like 'base_model:quantized:owner/name'
             base = t[len('base_model:'):]
             while ':' in base and base.count(':') > 1:
-                # Remove 'quantized:', 'finetuned:' etc.
                 parts = base.split(':')
                 if len(parts) > 1:
                     base = ':'.join(parts[1:])
@@ -105,27 +103,23 @@ def trace_ancestry(hf_id: str, visited: set | None = None) -> list:
     chain = []
     for base in immediate_bases:
         chain.append(base)
-        # Recurse deeper
         deeper = trace_ancestry(base, visited)
         chain.extend(deeper)
-        # Only need to trace the first branch deep enough
         break
     
     return chain
 
 
 def extract_version_token(name: str, family: str) -> str:
-    """Extract major/minor version suffix following the last occurrence of the family name (e.g. 2.5, 3, r1, v3)."""
+    """Extract major/minor version suffix following the last occurrence of the family name."""
     name = name.lower()
     idx = name.rfind(family.lower())
     if idx == -1:
         return ""
     sub = name[idx + len(family):]
-    # Match version pattern like "2.5", "3.1", "3", etc.
     m = re.match(r'^[-_]?(\d+(?:\.\d+)?)', sub)
     if m:
         return m.group(1)
-    # Match patterns like "r1", "v3"
     m = re.match(r'^[-_]?(r\d+|v\d+)', sub)
     if m:
         return m.group(1)
@@ -145,7 +139,6 @@ def find_recipe_by_keywords(hf_id: str, recipe_db: list) -> dict | None:
         return None
 
     target_version = extract_version_token(hf_id, found_family)
-    
     size_match = re.search(r'(\d+(?:\.\d+)?)[bB]', hf_id)
     target_size = float(size_match.group(1)) if size_match else None
     
@@ -159,12 +152,10 @@ def find_recipe_by_keywords(hf_id: str, recipe_db: list) -> dict | None:
         if found_family not in m_name and found_family not in m_label:
             continue
 
-        # Prevent generation mismatch (e.g. Qwen2.5 matching Qwen3 recipe)
         m_version = extract_version_token(m_name, found_family) or extract_version_token(m_label, found_family)
         if target_version != m_version:
             continue
 
-        # Prevent VL / text-only mismatch
         target_is_vl = 'vl' in hf_id.lower() or 'vision' in hf_id.lower()
         m_is_vl = 'vl' in m_name or 'vl' in m_label or 'vision' in m_name or 'vision' in m_label
         if target_is_vl != m_is_vl:
@@ -206,7 +197,9 @@ def infer_from_config(hf_id: str) -> dict:
         'found': False,
         'argv': argv,
         'note': f'Inferred from HF config.json (max_model_len: {max_model_len})',
-        'inferred_max_model_len': max_model_len
+        'inferred_max_model_len': max_model_len,
+        'min_vllm_version': '0.0.0',
+        'docker_image': 'vllm/vllm-openai:latest'
     }
 
 
@@ -231,6 +224,7 @@ def load_and_process_recipe(match: dict, hardware: str | None) -> dict:
         'found': True,
         'recipe_url': recipe_url,
         'min_vllm_version': recipe.get('model', {}).get('min_vllm_version', '0.0.0'),
+        'docker_image': recipe.get('model', {}).get('docker_image', ''),
         'argv': recommended.get('argv', ['vllm', 'serve', match.get('hf_id', '')]),
         'variants': {
             k: {'precision': v.get('precision', ''), 'vram_minimum_gb': v.get('vram_minimum_gb', 0)}
@@ -258,7 +252,9 @@ def main():
         print(json.dumps({
             'found': False,
             'argv': ['vllm', 'serve', hf_model_id, '--tensor-parallel-size', '1'],
-            'note': 'Could not reach recipes.vllm.ai'
+            'note': 'Could not reach recipes.vllm.ai',
+            'min_vllm_version': '0.0.0',
+            'docker_image': 'vllm/vllm-openai:latest'
         }))
         sys.exit(0)
 
@@ -302,7 +298,9 @@ def main():
     print(json.dumps({
         'found': False,
         'argv': ['vllm', 'serve', hf_model_id, '--tensor-parallel-size', '1'],
-        'note': 'All fallback levels failed. Using ultimate fallback.'
+        'note': 'All fallback levels failed. Using ultimate fallback.',
+        'min_vllm_version': '0.0.0',
+        'docker_image': 'vllm/vllm-openai:latest'
     }))
     sys.exit(0)
 
