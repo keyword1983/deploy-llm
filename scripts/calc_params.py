@@ -389,6 +389,15 @@ def main():
             if sharing_gpumem:
                 gpumem_bytes = parse_vram_bytes(f"{sharing_gpumem}MiB")
 
+        # Determine slice count for Hami vGPU environments
+        slice_count = gpu_count
+        if vgpu_scale < 1.0:
+            if gpumem_bytes > 0:
+                single_slice_bytes = per_gpu * vgpu_scale
+                slice_count = int(round(gpumem_bytes / single_slice_bytes))
+            else:
+                slice_count = gpu_count
+
         if gpumem_bytes > 0:
             total_vram = gpumem_bytes * gpu_count * 0.9
         else:
@@ -410,6 +419,7 @@ def main():
             'name':              name,
             'can_fit':           can_fit,
             'gpu_count':         gpu_count,
+            'slice_count':       slice_count,
             'product':           product,
             'family':            gpu_families.get(product, ''),
             'per_gpu_vram_bytes': per_gpu,
@@ -456,6 +466,15 @@ def main():
                     if sharing_gpumem:
                         gpumem_bytes = parse_vram_bytes(f"{sharing_gpumem}MiB")
 
+                    # Determine slice count for Hami vGPU environments
+                    slice_count = gpu_count
+                    if vgpu_scale < 1.0:
+                        if gpumem_bytes > 0:
+                            single_slice_bytes = per_gpu * vgpu_scale
+                            slice_count = int(round(gpumem_bytes / single_slice_bytes))
+                        else:
+                            slice_count = gpu_count
+
                     if gpumem_bytes > 0:
                         total_vram = gpumem_bytes * gpu_count * 0.9
                     else:
@@ -476,6 +495,7 @@ def main():
                         'name':              p.get('metadata', {}).get('name', ''),
                         'can_fit':           can_fit,
                         'gpu_count':         gpu_count,
+                        'slice_count':       slice_count,
                         'product':           product,
                         'family':            gpu_families.get(product, 'blackwell'),
                         'per_gpu_vram_bytes': per_gpu,
@@ -489,14 +509,25 @@ def main():
                 pass
 
     if slo == 'latency':
-        # Prefer fewest GPUs with sufficient context
+        # Prefer sufficient context first, then fewer slices to save resources, then larger context
         min_ctx = min(8192, context_len)
-        feasible.sort(key=lambda x: (x['gpu_count'], -(x['effective_ctx'] >= min_ctx), -x['effective_ctx']))
+        feasible.sort(key=lambda x: (
+            -(x['effective_ctx'] >= min_ctx),
+            x['slice_count'],
+            -x['effective_ctx']
+        ))
     elif slo == 'throughput':
-        # Prefer largest effective context
-        feasible.sort(key=lambda x: (-x['effective_ctx'], x['gpu_count']))
+        # Prefer largest effective context, then fewer slices
+        feasible.sort(key=lambda x: (
+            -x['effective_ctx'],
+            x['slice_count']
+        ))
     else:  # balanced
-        feasible.sort(key=lambda x: (x['gpu_count'], -x['effective_ctx']))
+        # Prefer fewer slices first to save resources, then larger effective context
+        feasible.sort(key=lambda x: (
+            x['slice_count'],
+            -x['effective_ctx']
+        ))
 
     if not feasible:
         print(json.dumps({'error': 'no feasible preset found', 'all': results}))
@@ -542,8 +573,22 @@ def main():
     gpu_memory_limit_mib = 0
     gpu_cores_limit = 0
     if vgpu_scale < 1.0:
-        gpu_memory_limit_mib = int((best['per_gpu_vram_bytes'] * vgpu_scale * best['gpu_count']) / (1024**2))
-        gpu_cores_limit = int(100 * vgpu_scale * best['gpu_count'])
+        # Check if the preset spec has an explicit gpumem limit in K8s
+        preset_spec = k8s_presets_map.get(best['name']) if 'k8s_presets_map' in locals() else None
+        sharing_gpumem = ""
+        if preset_spec:
+            sharing_gpumem = preset_spec.get("gpuInfo", {}).get("sharing", {}).get("nvidia.com/gpumem", "")
+            
+        if sharing_gpumem:
+            gpu_memory_limit_mib = int(sharing_gpumem)
+            sharing_gpucores = preset_spec.get("gpuInfo", {}).get("sharing", {}).get("nvidia.com/gpucores", "")
+            if sharing_gpucores:
+                gpu_cores_limit = int(sharing_gpucores)
+            else:
+                gpu_cores_limit = int(100 * vgpu_scale * best['slice_count'])
+        else:
+            gpu_memory_limit_mib = int((best['per_gpu_vram_bytes'] * vgpu_scale * best['slice_count']) / (1024**2))
+            gpu_cores_limit = int(100 * vgpu_scale * best['slice_count'])
 
     print(json.dumps({
         'preset':                 best['name'],
