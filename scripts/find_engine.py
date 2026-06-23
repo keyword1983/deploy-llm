@@ -15,12 +15,16 @@ Exit codes:
   2 = API request failed
 """
 import sys
+import os
 import json
 import re
 import urllib.request
 import urllib.error
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from token_utils import refresh_token
 
 
 def parse_version(engine: dict) -> tuple:
@@ -183,8 +187,25 @@ def main():
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        print(f'ERROR: HTTP {e.code} calling {url}')
-        sys.exit(2)
+        if e.code == 401:
+            try:
+                sys.stderr.write('  ⏳ Token expired (401), refreshing...\n')
+                sys.stderr.flush()
+                token = refresh_token()
+                req.add_header('Authorization', f'Bearer {token}')
+                # Remove old header first by rebuilding
+                req = urllib.request.Request(url, headers={
+                    'Authorization': f'Bearer {token}',
+                    'Content-Type': 'application/json',
+                })
+                with urllib.request.urlopen(req) as resp:
+                    data = json.loads(resp.read())
+            except Exception as e2:
+                print(f'ERROR: HTTP 401 + refresh failed: {e2}')
+                sys.exit(2)
+        else:
+            print(f'ERROR: HTTP {e.code} calling {url}')
+            sys.exit(2)
     except Exception as e:
         print(f'ERROR: {e}')
         sys.exit(2)

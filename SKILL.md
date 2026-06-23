@@ -10,12 +10,13 @@ argument-hint: [模型名稱或 HuggingFace model ID]
 
 ## 環境與認證確認 (一鍵自動探索)
 
+腳本路徑皆使用相對於 SKILL.md 的路徑（如 `scripts/bootstrap_env.py`），pi 會自動解析為正確絕對路徑，無論 skill 放在哪個目錄都能正常運作。
+
 **只需執行一個腳本即可自動取得所有必要變數：**
 
-```bash
-python3 /home/asus/.gemini/skills/deploy-llm/scripts/bootstrap_env.py > /tmp/bootstrap_env.json
+!`python3 scripts/bootstrap_env.py > /tmp/bootstrap_env.json`
+
 cat /tmp/bootstrap_env.json
-```
 
 腳本輸出 JSON：`{ api_base_url, access_token, project_id }`。將其解析為：
 - `API_BASE_URL` = `api_base_url`
@@ -41,7 +42,7 @@ cat /tmp/bootstrap_env.json
 1. **取得 refresh_token**：請使用者登入 afsbox Portal，打開瀏覽器 DevTools (F12) → Application → Cookies → 複製 `refresh_token` 的 Value。
 2. **換取 token**：
    ```bash
-   python3 /home/asus/.gemini/skills/deploy-llm/scripts/get_token.py "{API_BASE_URL}" "{REFRESH_TOKEN}" > /tmp/token
+   python3 scripts/get_token.py "{API_BASE_URL}" "{REFRESH_TOKEN}" > /tmp/token
    ```
 
 > 💡 `HF_CREDENTIAL_ID`：HuggingFace Token credential，僅 gated/private 模型需要。
@@ -84,7 +85,7 @@ cat /tmp/bootstrap_env.json
 
 執行腳本（以實際值取代 `{API_BASE_URL}` 和 `{ACCESS_TOKEN}`）：
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}"`
+!`python3 scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}"`
 
 腳本輸出 JSON：`{ id, name, version, chartRef, servicePort }`
 
@@ -117,7 +118,7 @@ cat /tmp/bootstrap_env.json
 
 執行腳本（以實際值取代，HARDWARE 可選填如 `h100`、`h200`）：
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/find_recipe.py "{HF_MODEL_ID}" "{HARDWARE}"`
+!`python3 scripts/find_recipe.py "{HF_MODEL_ID}" "{HARDWARE}"`
 
 腳本輸出 JSON：`{ found, min_vllm_version, argv, variants, has_fp8, has_nvfp4, recipe_url }`
 
@@ -131,7 +132,7 @@ cat /tmp/bootstrap_env.json
 **驗證版本相容性**（LLM 推理）：
 若 `ENGINE_VERSION` < `RECIPE_MIN_VERSION`，重新執行 Step 2 腳本並加上 `MIN_VERSION` 參數：
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{RECIPE_MIN_VERSION}"`
+!`python3 scripts/find_engine.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{RECIPE_MIN_VERSION}"`
 
 ```
 [3/6] ✅ Recipe：最低 vLLM {RECIPE_MIN_VERSION}+  has_fp8={HAS_FP8}
@@ -144,7 +145,7 @@ cat /tmp/bootstrap_env.json
 
 **4a. 確認是否已存在並產生 slug：**
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/check_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}"`
+!`python3 scripts/check_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}"`
 
 腳本輸出 JSON：`{ exists, repo_name, phase, slug }`
 
@@ -155,11 +156,11 @@ cat /tmp/bootstrap_env.json
 
 執行腳本（若有 `HF_CREDENTIAL_ID` 則加在最後）：
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}"`
+!`python3 scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}"`
 
 若有 gated/private 模型需要 credential：
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}" "{HF_CREDENTIAL_ID}"`
+!`python3 scripts/create_repo.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{HF_MODEL_ID}" "{REPO_NAME}" "{HF_CREDENTIAL_ID}"`
 
 腳本輸出 JSON：`{ created, repo_name, source_uri }`
 
@@ -174,7 +175,7 @@ cat /tmp/bootstrap_env.json
 
 **4c. 輪詢下載狀態：**
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/poll_download.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{REPO_NAME}"`
+!`python3 scripts/poll_download.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{REPO_NAME}"`
 
 - 輸出以 `READY:` 開頭 → 解析 JSON，記錄為 `MODEL_INFO`
 - 輸出以 `FAILED:` 開頭 → 顯示錯誤訊息，詢問是否重試
@@ -207,7 +208,7 @@ Authorization: Bearer {ACCESS_TOKEN}
 
 **5b. 執行參數計算腳本：**
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/calc_params.py '{MODEL_INFO}' '{PRESETS_JSON}' '{CAPABILITY_JSON}' balanced {HAS_FP8}`
+!`python3 scripts/calc_params.py '{MODEL_INFO}' '{PRESETS_JSON}' '{CAPABILITY_JSON}' balanced {HAS_FP8}`
 
 腳本輸出 JSON：`{ preset, gpu_count, product, tp_size, max_model_len, dtype, gpu_memory_utilization, max_num_seqs, vram_used_gb, vram_total_gb, vram_pct, gpu_memory_limit_mib, gpu_cores_limit }`
 
@@ -410,7 +411,7 @@ API 呼叫失敗（非 2xx）時顯示錯誤並停止。
 
 ## STEP 7｜等待服務就緒
 
-!`python3 /home/asus/.gemini/skills/deploy-llm/scripts/poll_serving.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{SERVING_NAME}"`
+!`python3 scripts/poll_serving.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID}" "{SERVING_NAME}"`
 
 - 輸出以 `READY:` 開頭 → 解析 JSON，顯示完整結果
 - 輸出 `TIMEOUT` → 顯示診斷建議
@@ -447,6 +448,70 @@ curl -s -X POST {internal}/v1/chat/completions \
   3. Engine chartRef 是否存在且可用？
   4. 查看 serving 的 conditions 欄位是否有錯誤訊息
 ```
+
+---
+
+## GGUF 格式與 llama.cpp 推理引擎部署指南
+
+如果部署的模型是 GGUF 格式，或者需要使用 `llama.cpp` 作為推理引擎，應採用以下特別策略：
+
+### 1. 引擎與鏡像選擇
+*   **引擎與範本**：需建立或使用支持 `llama.cpp` 的 `ModelEngine`（例如名為 `llamacpp-b9371` 的範本，其 `chartRef.name` 應為該叢集內實際的 `inference-engine-0.1.0` 或對應版本）。
+*   **引擎類型**：在 ModelServing 提交 API 中，`engine.type` 設為 `vllm`（與底層 API 相容），但 `servicePort` 需設為 `5000`（或 llama-server 設定的通訊埠），且必須在 `answers` 中明確設定 `values.service.port: 5000`。
+*   **私有 Docker Hub 認證**：若使用 `ociscloud/llama.cpp:b9371-cu1300-gb10` 等私有鏡像，部署時必須在 `answers` 中加入私有登錄秘密以防止 `ErrImagePull`：
+    ```json
+    "values.imagePullSecrets": [
+      { "name": "regcred-ocis" }
+    ]
+    ```
+
+### 2. 確定模型檔案名稱
+GGUF 倉庫通常包含多個檔案或多級目錄，因此必須找出具體的 `.gguf` 檔案路徑：
+*   在 `ModelRepository` `Ready` 後，透過該 repo 的實體路徑（主機上的 `/var/lib/afsbox/models/{PROJECT_ID}/models/.../latest`）執行 `ls` 列出目錄，找出正確的 GGUF 檔名（例如 `Qwable-27b_Q4_K_M.gguf`）。
+
+### 3. 模型載入絕對路徑配置 (關鍵)
+在 `llama.cpp` 的啟動指令中，直接使用 `${MODEL_PATH}` 有時可能因環境變數解析空值，導致容器去根目錄加載 `/YourModel.gguf` 而發生 **No such file or directory** 錯誤。
+*   **最佳實踐**：在 `values.command` 的啟動命令中，將掛載路徑寫死為容器內的絕對路徑：
+    `/models/{PROJECT_ID}/models/{REPO_NAME_SUB_PATH}/latest/{GGUF_FILE}`
+    （例如：`/models/proj-707c659f/models/mia-ailab/qwable-3.6-27b/latest/Qwable-27b_Q4_K_M.gguf`）
+*   **啟動命令範例**：
+    ```json
+    "values.command": [
+      "/opt/llama.cpp/llama-server",
+      "-m",
+      "/models/proj-707c659f/models/mia-ailab/qwable-3.6-27b/latest/Qwable-27b_Q4_K_M.gguf",
+      "-c",
+      "128400",
+      "--parallel",
+      "1",
+      "--batch-size",
+      "2048",
+      "--ubatch-size",
+      "512",
+      "--cache-type-k",
+      "q4_0",
+      "--cache-type-v",
+      "q4_0",
+      "--threads",
+      "16",
+      "--jinja",
+      "-n",
+      "-1",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "5000",
+      "-ngl",
+      "512",
+      "--flash-attn",
+      "on",
+      "--alias",
+      "qwable-3.6-27b",
+      "--tensor-split",
+      "1",
+      "--no-webui"
+    ]
+    ```
 
 ---
 

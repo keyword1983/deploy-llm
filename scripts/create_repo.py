@@ -24,11 +24,15 @@ Exit codes:
   2 = argument / request error
 """
 import sys
+import os
 import json
 import urllib.request
 import urllib.error
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from token_utils import refresh_token
 
 
 def main():
@@ -84,6 +88,32 @@ def main():
             err_body = json.loads(body_bytes)
         except Exception:
             err_body = body_bytes.decode('utf-8', errors='replace')
+
+        # 401 = token expired, try refresh once
+        if e.code == 401:
+            try:
+                sys.stderr.write('  ⏳ Token expired (401), refreshing...\n')
+                sys.stderr.flush()
+                token = refresh_token()
+                req = urllib.request.Request(
+                    url, data=payload, method='POST',
+                    headers={
+                        'Authorization': f'Bearer {token}',
+                        'Content-Type': 'application/json',
+                    },
+                )
+                with urllib.request.urlopen(req) as resp:
+                    resp_data = json.loads(resp.read() or b'{}')
+                    print(json.dumps({
+                        'created': True,
+                        'repo_name': repo_name,
+                        'source_uri': f'hf://{hf_model_id}',
+                        'response': resp_data,
+                    }))
+                    sys.exit(0)
+            except Exception as e2:
+                print(f'ERROR: HTTP 401 + refresh failed: {e2}')
+                sys.exit(1)
 
         # 409 Conflict = already exists, treat as OK
         if e.code == 409:

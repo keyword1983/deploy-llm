@@ -18,12 +18,17 @@ Exit codes:
   2 = Timeout or request error
 """
 import sys
+import os
 import json
 import time
 import urllib.request
 import urllib.error
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
+
+# Allow import from scripts directory
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from token_utils import is_token_expired, refresh_token
 
 
 def main():
@@ -39,18 +44,35 @@ def main():
     interval     = int(sys.argv[6]) if len(sys.argv) > 6 else 15
 
     url = f'{api_base}/api/v1/models/projects/{project_id}/servings/{serving_name}'
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json',
-    }
 
     start = time.time()
     while time.time() - start < timeout:
+        # Auto-refresh token if about to expire during this polling cycle
+        if is_token_expired(token, buffer_seconds=interval + 30):
+            try:
+                sys.stderr.write('  ⏳ Token expiring, refreshing...\n')
+                sys.stderr.flush()
+                token = refresh_token()
+            except Exception as e:
+                print(f'  Token refresh failed: {e}', flush=True)
+
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json',
+        }
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
         except urllib.error.HTTPError as e:
+            if e.code == 401:
+                try:
+                    sys.stderr.write('  ⏳ Token expired (401), refreshing...\n')
+                    sys.stderr.flush()
+                    token = refresh_token()
+                    continue
+                except Exception:
+                    pass
             print(f'  HTTP {e.code} — retrying...', flush=True)
             time.sleep(interval)
             continue
