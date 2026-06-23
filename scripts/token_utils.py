@@ -60,26 +60,61 @@ def _get_keycloak_ip():
     return None
 
 
-def _get_client_creds():
-    """Get Keycloak client_id and client_secret from K8s secret."""
+def _get_k8s_secret_data() -> dict | None:
+    """Read the K8s afsbox-platform-secret."""
     try:
         proc = subprocess.run(
             ["kubectl", "get", "secret", "afsbox-platform-secret",
              "-n", "afsbox-system", "-o", "json"],
             capture_output=True, text=True, timeout=5
         )
-        if proc.returncode != 0:
-            return None, None
-        data = json.loads(proc.stdout)
+        if proc.returncode == 0:
+            return json.loads(proc.stdout)
+    except Exception:
+        pass
+    return None
+
+
+def _get_client_creds(secret_data: dict) -> tuple:
+    """Extract Keycloak client_id and client_secret from K8s secret data."""
+    if not secret_data:
+        return None, None
+    try:
         client_id = base64.b64decode(
-            data.get("data", {}).get("IAM_KEYCLOAK_CLIENT_ID", "")
+            secret_data.get("data", {}).get("IAM_KEYCLOAK_CLIENT_ID", "")
         ).decode("utf-8").strip()
         client_secret = base64.b64decode(
-            data.get("data", {}).get("IAM_KEYCLOAK_CLIENT_SECRET", "")
+            secret_data.get("data", {}).get("IAM_KEYCLOAK_CLIENT_SECRET", "")
         ).decode("utf-8").strip()
         return client_id, client_secret
     except Exception:
         return None, None
+
+
+def _get_admin_creds(secret_data: dict = None) -> tuple:
+    """Get Keycloak admin username and password from env vars, K8s secret, or default fallback."""
+    # 1. Try env vars
+    admin_user = os.environ.get("KEYCLOAK_ADMIN_USER", "")
+    admin_pass = os.environ.get("KEYCLOAK_ADMIN_PASS", "")
+    if admin_user and admin_pass:
+        return admin_user, admin_pass
+
+    # 2. Try K8s secret keys
+    if secret_data:
+        try:
+            b64_user = secret_data.get("data", {}).get("ADMIN_USERNAME", "")
+            b64_pass = secret_data.get("data", {}).get("ADMIN_PASSWORD", "")
+            if b64_user:
+                admin_user = base64.b64decode(b64_user).decode("utf-8").strip()
+            if b64_pass:
+                admin_pass = base64.b64decode(b64_pass).decode("utf-8").strip()
+            if admin_user and admin_pass:
+                return admin_user, admin_pass
+        except Exception:
+            pass
+
+    # 3. Default fallback
+    return "admin@asus.com", "admin"
 
 
 def refresh_token() -> str:
@@ -88,9 +123,12 @@ def refresh_token() -> str:
     Returns: new access_token string
     Raises: RuntimeError if refresh fails
     """
-    client_id, client_secret = _get_client_creds()
+    secret_data = _get_k8s_secret_data()
+    client_id, client_secret = _get_client_creds(secret_data)
     if not client_id or not client_secret:
         raise RuntimeError("Cannot read Keycloak credentials from K8s secret")
+
+    admin_user, admin_pass = _get_admin_creds(secret_data)
 
     keycloak_ip = _get_keycloak_ip()
     if not keycloak_ip:
@@ -100,8 +138,8 @@ def refresh_token() -> str:
         f"client_id={client_id}&"
         f"client_secret={client_secret}&"
         f"grant_type=password&"
-        f"username=admin@asus.com&"
-        f"password=admin&"
+        f"username={admin_user}&"
+        f"password={admin_pass}&"
         f"scope=openid"
     ).encode("utf-8")
 

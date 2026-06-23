@@ -37,63 +37,10 @@ import base64
 
 def get_token_via_k8s():
     try:
-        import socket
-
-        # 1. Get client secret from secret
-        secret_cmd = ["kubectl", "get", "secret", "afsbox-platform-secret", "-n", "afsbox-system", "-o", "json"]
-        proc = subprocess.run(secret_cmd, capture_output=True, text=True, timeout=5)
-        if proc.returncode != 0:
-            return None
-        secret_data = json.loads(proc.stdout)
-        client_id_b64 = secret_data.get("data", {}).get("IAM_KEYCLOAK_CLIENT_ID", "")
-        client_secret_b64 = secret_data.get("data", {}).get("IAM_KEYCLOAK_CLIENT_SECRET", "")
-        if not client_id_b64 or not client_secret_b64:
-            return None
-        client_id = base64.b64decode(client_id_b64).decode("utf-8").strip()
-        client_secret = base64.b64decode(client_secret_b64).decode("utf-8").strip()
-
-        # 2. Get Keycloak service IP — prefer kubectl, fallback to DNS resolution
-        keycloak_ip = None
-        # Try kubectl first (may fail due to RBAC cross-namespace restrictions)
-        svc_cmd = ["kubectl", "get", "svc", "keycloak-keycloakx-http", "-n", "keycloak", "-o", "jsonpath={.spec.clusterIP}"]
-        proc2 = subprocess.run(svc_cmd, capture_output=True, text=True, timeout=5)
-        if proc2.returncode == 0:
-            keycloak_ip = proc2.stdout.strip()
-        # Fallback: resolve via in-cluster DNS
-        if not keycloak_ip:
-            try:
-                keycloak_ip = socket.gethostbyname("keycloak-keycloakx-http.keycloak.svc.cluster.local")
-            except socket.gaierror:
-                return None
-        if not keycloak_ip:
-            return None
-
-        # 3. Call Keycloak token endpoint — try port 8080 first, then port 80
-        url = None
-        for port in [8080, 80]:
-            candidate_url = f"http://{keycloak_ip}:{port}/realms/afsbox/protocol/openid-connect/token" if port != 80 else f"http://{keycloak_ip}/realms/afsbox/protocol/openid-connect/token"
-            data = (
-                f"client_id={client_id}&"
-                f"client_secret={client_secret}&"
-                f"grant_type=password&"
-                f"username=admin@asus.com&"
-                f"password=admin&"
-                f"scope=openid"
-            ).encode("utf-8")
-            req = urllib.request.Request(
-                candidate_url,
-                data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    res_json = json.loads(resp.read().decode("utf-8"))
-                    return res_json.get("access_token")
-            except (urllib.error.HTTPError, urllib.error.URLError):
-                continue
-            except Exception:
-                break
-        return None
+        import os
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from token_utils import refresh_token
+        return refresh_token()
     except Exception:
         return None
 

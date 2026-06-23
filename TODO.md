@@ -20,13 +20,15 @@
 
 ### P0 — 安全與相容性（必須修）
 
-- [ ] **B. 憑證硬編碼**
+- [x] **B. 憑證硬編碼**
   - 影響：`bootstrap_env.py` 和 `get_token.py` 硬編碼 `admin@asus.com` / `admin`
   - 方案：從 K8s Secret 讀取（新增 `ADMIN_USERNAME` / `ADMIN_PASSWORD` key），或改用環境變數 `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASS`
+  - 狀態：已改為優先讀取 `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASS` 環境變數與 K8s Secret `ADMIN_USERNAME` / `ADMIN_PASSWORD` 欄位，最後才 fallback 到默認值。
 
-- [ ] **A. 路徑硬編碼**
+- [x] **A. 路徑硬編碼**
   - 影響：SKILL.md 與腳本中 `/home/asus/.gemini/skills/deploy-llm/scripts/`、`/home/asus/frank/afsbox/` 等絕對路徑，換環境失效
   - 方案：改用環境變數 `SKILL_DIR` 或 `${BASH_SOURCE}` 動態解析；SKILL.md 中用 `{SKILL_DIR}/scripts/` 替代
+  - 狀態：已全面改為相對路徑（包括 scripts/xxx.py 呼叫，並消除了對本地實體 yaml 的路徑依賴）。
 
 ### P1 — 穩定性（強烈建議修）
 
@@ -40,9 +42,10 @@
 
 ### P2 — 維護性（建議修）
 
-- [ ] **C. 程式碼重複**
+- [x] **C. 程式碼重複**
   - 影響：`bootstrap_env.py::get_token()` 與 `get_token.py::get_token_via_k8s()` 約 60 行邏輯重複
   - 方案：抽取共用模組 `scripts/auth.py`，兩個腳本 import 共用函數
+  - 狀態：已將所有的憑證/K8s 交互登入邏輯統一收攏至 `token_utils.py` 的 `refresh_token()` 函數，原有的重複邏輯全部改為 import 該共用函數。
 
 - [ ] **I. stdout/stderr 分離**
   - 影響：progress 行（`phase=Running elapsed=60s`）混在 stdout，AI 解析 JSON 時可能失敗
