@@ -292,6 +292,26 @@ Authorization: Bearer {ACCESS_TOKEN}
 >       "type": "Recreate"
 >     }
 >   }
+> 
+> > 💡 **推理與工具調用高級參數之自動追加**：
+> - 當從 `find_recipe.py` 中獲取到 `extra_args` 陣列（含有如 `--reasoning-parser` 或 `--enable-auto-tool-choice` 等參數）時，**務必將其所有項目追加至 `values.command` 陣列的尾端**，以啟用新一代推理或工具解析功能。
+> - 例如，若 `extra_args` 為 `["--reasoning-parser", "deepseek_r1"]`，則 `values.command` 應擴充為：
+>   ```json
+>   "values.command": [
+>     "python3",
+>     "-m",
+>     "vllm.entrypoints.openai.api_server",
+>     "--model=${MODEL_PATH}",
+>     "--served-model-name=${SERVED_MODEL_NAME}",
+>     "--port=${SERVICE_PORT}",
+>     "--max-model-len=${CONTEXT_LENGTH}",
+>     "--max-num-seqs=${BATCH_SIZE}",
+>     "--dtype=bfloat16",
+>     "--gpu-memory-utilization=${GPU_MEMORY_UTILIZATION}",
+>     "--max-num-batched-tokens=${MAX_NUM_BATCHED_TOKENS}",
+>     "--reasoning-parser",
+>     "deepseek_r1"
+>   ]
 >   ```
 
 **6b. 預覽部署 YAML：**

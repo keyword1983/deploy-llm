@@ -36,6 +36,123 @@ def fetch_json(url: str) -> dict | None:
         return None
 
 
+def check_features_from_hf(hf_id: str) -> tuple[bool, bool]:
+    """Check if model supports reasoning and tool calling by analyzing HF configs.
+    
+    Returns (has_reasoning, has_tools)
+    """
+    has_reasoning = False
+    has_tools = False
+
+    hf_id_lower = hf_id.lower()
+    is_instruct = any(x in hf_id_lower for x in ['instruct', 'chat', '-it', 'distill', 'coder', 'qwq', 'r1', 'thinking'])
+    if not is_instruct:
+        return False, False
+
+    # 1. Fetch tokenizer_config.json
+    tok_url = f'{HF_RESOLVE_BASE}/{hf_id}/resolve/main/tokenizer_config.json'
+    tok_cfg = fetch_json(tok_url)
+    if tok_cfg:
+        chat_temp = tok_cfg.get('chat_template', '')
+        if isinstance(chat_temp, str):
+            chat_temp_lower = chat_temp.lower()
+            # Check for tools in chat_template
+            if 'tools' in chat_temp_lower or 'tool_use' in chat_temp_lower or 'tool_call' in chat_temp_lower:
+                has_tools = True
+            # Check for thinking/reasoning tags in chat_template
+            if 'think' in chat_temp_lower or 'reasoning' in chat_temp_lower:
+                has_reasoning = True
+        
+        # Check added_tokens
+        added_tokens = tok_cfg.get('added_tokens_decoder', {}) or {}
+        for token_val in added_tokens.values():
+            content = token_val.get('content', '') if isinstance(token_val, dict) else str(token_val)
+            if '<think>' in content or '</think>' in content:
+                has_reasoning = True
+
+    # 2. Fetch generation_config.json
+    gen_url = f'{HF_RESOLVE_BASE}/{hf_id}/resolve/main/generation_config.json'
+    gen_cfg = fetch_json(gen_url)
+    if gen_cfg:
+        if 'thinking' in gen_cfg or 'reasoning' in gen_cfg:
+            has_reasoning = True
+            
+    # 3. Model ID heuristics as fallback (e.g. if offline, rate-limited, or gated model)
+    hf_id_lower = hf_id.lower()
+    if 'r1' in hf_id_lower or 'qwq' in hf_id_lower or 'thinking' in hf_id_lower or 'qwen3' in hf_id_lower:
+        has_reasoning = True
+
+    known_tool_families = ['llama3', 'llama-3', 'qwen', 'hermes', 'mistral', 'mixtral', 'internlm', 'gemma']
+    if not has_tools and any(f in hf_id_lower for f in known_tool_families):
+        if any(x in hf_id_lower for x in ['instruct', 'chat', '-it', 'coder']):
+            has_tools = True
+
+    return has_reasoning, has_tools
+
+
+def detect_reasoning_parser(hf_id: str) -> str | None:
+    hf_id_lower = hf_id.lower()
+    if 'deepseek' in hf_id_lower and 'r1' in hf_id_lower:
+        return 'deepseek_r1'
+    if 'qwq' in hf_id_lower:
+        return 'deepseek_r1'
+    if 'qwen3' in hf_id_lower:
+        return 'qwen3'
+    if 'gemma-4' in hf_id_lower or 'gemma4' in hf_id_lower:
+        return 'gemma4'
+    if 'granite' in hf_id_lower:
+        return 'granite'
+    if 'hunyuan' in hf_id_lower:
+        return 'hunyuan_a13b'
+    if 'minimax' in hf_id_lower:
+        return 'minimax_m3'
+    return 'deepseek_r1'
+
+
+def detect_tool_parser(hf_id: str) -> str | None:
+    hf_id_lower = hf_id.lower()
+    if 'llama3' in hf_id_lower or 'llama-3' in hf_id_lower:
+        return 'llama3_json'
+    if 'hermes' in hf_id_lower:
+        return 'hermes'
+    if 'mistral' in hf_id_lower or 'mixtral' in hf_id_lower:
+        return 'mistral'
+    if 'internlm' in hf_id_lower:
+        return 'internlm'
+    if 'functiongemma' in hf_id_lower:
+        return 'functiongemma'
+    if 'gemma-4' in hf_id_lower or 'gemma4' in hf_id_lower:
+        return 'gemma4'
+    if 'qwen' in hf_id_lower:
+        if 'qwen3' in hf_id_lower:
+            if 'coder' in hf_id_lower:
+                return 'qwen3_coder'
+            return 'qwen3_xml'
+        return 'hermes'
+    return 'hermes'
+
+
+def build_extra_args(hf_id: str, existing_argv: list) -> list:
+    extra = []
+    argv_lower = [x.lower() for x in existing_argv]
+
+    has_reasoning, has_tools = check_features_from_hf(hf_id)
+
+    # Check reasoning parser
+    if '--reasoning-parser' not in argv_lower and has_reasoning:
+        parser = detect_reasoning_parser(hf_id)
+        if parser:
+            extra.extend(['--reasoning-parser', parser])
+
+    # Check tool calling
+    if '--enable-auto-tool-choice' not in argv_lower and has_tools:
+        tool_parser = detect_tool_parser(hf_id)
+        if tool_parser:
+            extra.extend(['--enable-auto-tool-choice', '--tool-call-parser', tool_parser])
+                
+    return extra
+
+
 def find_recipe_exact(hf_id: str, recipe_db: list) -> dict | None:
     """Level 1: Exact match in recipe DB"""
     match = next((m for m in recipe_db if m.get('hf_id', '').lower() == hf_id.lower()), None)
@@ -196,6 +313,7 @@ def infer_from_config(hf_id: str) -> dict:
     return {
         'found': False,
         'argv': argv,
+        'extra_args': build_extra_args(hf_id, argv),
         'note': f'Inferred from HF config.json (max_model_len: {max_model_len})',
         'inferred_max_model_len': max_model_len,
         'min_vllm_version': '0.0.0',
@@ -203,7 +321,7 @@ def infer_from_config(hf_id: str) -> dict:
     }
 
 
-def load_and_process_recipe(match: dict, hardware: str | None) -> dict:
+def load_and_process_recipe(match: dict, hardware: str | None, target_hf_id: str) -> dict:
     """Load the full recipe JSON and process it"""
     recipe_path = match.get('json', '')
     recipe_url = f'{RECIPES_BASE}{recipe_path}'
@@ -220,12 +338,14 @@ def load_and_process_recipe(match: dict, hardware: str | None) -> dict:
     recommended = hw_config or recipe.get('recommended_command', {})
     variants = recipe.get('variants', {})
     
+    rec_argv = recommended.get('argv', ['vllm', 'serve', match.get('hf_id', '')])
     result = {
         'found': True,
         'recipe_url': recipe_url,
         'min_vllm_version': recipe.get('model', {}).get('min_vllm_version', '0.0.0'),
         'docker_image': recipe.get('model', {}).get('docker_image', ''),
-        'argv': recommended.get('argv', ['vllm', 'serve', match.get('hf_id', '')]),
+        'argv': rec_argv,
+        'extra_args': build_extra_args(target_hf_id, rec_argv),
         'variants': {
             k: {'precision': v.get('precision', ''), 'vram_minimum_gb': v.get('vram_minimum_gb', 0)}
             for k, v in variants.items()
@@ -249,9 +369,11 @@ def main():
     recipe_db = fetch_json(f'{RECIPES_BASE}/models.json')
     if not recipe_db:
         # Ultimate Fallback if Recipe DB is unreachable
+        fb_argv = ['vllm', 'serve', hf_model_id, '--tensor-parallel-size', '1']
         print(json.dumps({
             'found': False,
-            'argv': ['vllm', 'serve', hf_model_id, '--tensor-parallel-size', '1'],
+            'argv': fb_argv,
+            'extra_args': build_extra_args(hf_model_id, fb_argv),
             'note': 'Could not reach recipes.vllm.ai',
             'min_vllm_version': '0.0.0',
             'docker_image': 'vllm/vllm-openai:latest'
@@ -261,7 +383,7 @@ def main():
     # --- LEVEL 1: Exact Match ---
     match = find_recipe_exact(hf_model_id, recipe_db)
     if match:
-        result = load_and_process_recipe(match, hardware)
+        result = load_and_process_recipe(match, hardware, hf_model_id)
         if result:
             print(json.dumps(result))
             sys.exit(0)
@@ -271,7 +393,7 @@ def main():
     for ancestor in ancestry_chain:
         ancestor_match = find_recipe_exact(ancestor, recipe_db)
         if ancestor_match:
-            result = load_and_process_recipe(ancestor_match, hardware)
+            result = load_and_process_recipe(ancestor_match, hardware, hf_model_id)
             if result:
                 result['base_model_inherited'] = ancestor
                 result['ancestry_chain'] = ancestry_chain
@@ -282,7 +404,7 @@ def main():
     # --- LEVEL 3: Family Keyword Matching ---
     keyword_match = find_recipe_by_keywords(hf_model_id, recipe_db)
     if keyword_match:
-        result = load_and_process_recipe(keyword_match, hardware)
+        result = load_and_process_recipe(keyword_match, hardware, hf_model_id)
         if result:
             result['note'] = f'Exact match not found. Approximate match found in recipe DB: {keyword_match.get("hf_id")}'
             print(json.dumps(result))
@@ -295,9 +417,11 @@ def main():
         sys.exit(0)
         
     # Ultimate Fallback
+    fb_argv = ['vllm', 'serve', hf_model_id, '--tensor-parallel-size', '1']
     print(json.dumps({
         'found': False,
-        'argv': ['vllm', 'serve', hf_model_id, '--tensor-parallel-size', '1'],
+        'argv': fb_argv,
+        'extra_args': build_extra_args(hf_model_id, fb_argv),
         'note': 'All fallback levels failed. Using ultimate fallback.',
         'min_vllm_version': '0.0.0',
         'docker_image': 'vllm/vllm-openai:latest'
