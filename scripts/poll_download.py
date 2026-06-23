@@ -55,7 +55,7 @@ def main():
                 sys.stderr.flush()
                 token = refresh_token()
             except Exception as e:
-                print(f'  Token refresh failed: {e}', flush=True)
+                print(f'  Token refresh failed: {e}', file=sys.stderr, flush=True)
 
         headers = {
             'Authorization': f'Bearer {token}',
@@ -74,17 +74,17 @@ def main():
                     continue
                 except Exception:
                     pass
-            print(f'  HTTP {e.code} — retrying...', flush=True)
+            print(f'  HTTP {e.code} — retrying...', file=sys.stderr, flush=True)
             time.sleep(interval)
             continue
         except Exception as e:
-            print(f'  Request error: {e} — retrying...', flush=True)
+            print(f'  Request error: {e} — retrying...', file=sys.stderr, flush=True)
             time.sleep(interval)
             continue
 
         phase = data.get('phase', '')
         elapsed = int(time.time() - start)
-        print(f'  phase={phase} elapsed={elapsed}s', flush=True)
+        print(f'  phase={phase} elapsed={elapsed}s', file=sys.stderr, flush=True)
 
         if phase == 'Ready':
             mi = data.get('model_info') or {}

@@ -54,7 +54,7 @@ def main():
                 sys.stderr.flush()
                 token = refresh_token()
             except Exception as e:
-                print(f'  Token refresh failed: {e}', flush=True)
+                print(f'  Token refresh failed: {e}', file=sys.stderr, flush=True)
 
         headers = {
             'Authorization': f'Bearer {token}',
@@ -73,24 +73,70 @@ def main():
                     continue
                 except Exception:
                     pass
-            print(f'  HTTP {e.code} — retrying...', flush=True)
+            print(f'  HTTP {e.code} — retrying...', file=sys.stderr, flush=True)
             time.sleep(interval)
             continue
         except Exception as e:
-            print(f'  Request error: {e} — retrying...', flush=True)
+            print(f'  Request error: {e} — retrying...', file=sys.stderr, flush=True)
             time.sleep(interval)
             continue
 
         output   = data.get('output') or {}
         endpoint = (output.get('internalEndpoint') or {}).get('value', '')
         elapsed  = int(time.time() - start)
-        print(f'  waiting... {elapsed}s', flush=True)
+        print(f'  waiting... {elapsed}s', file=sys.stderr, flush=True)
 
         if endpoint:
+            model_name = (output.get('servedModelName') or {}).get('value', '')
+            external_endpoint = (output.get('externalEndpoint') or {}).get('value', '')
+            
+            # Smoke test health check
+            sys.stderr.write(f'  ⏳ Endpoint available, running health check on {model_name}...\n')
+            sys.stderr.flush()
+            
+            import socket
+            try:
+                # Run health check
+                url = f"{endpoint.rstrip('/')}/v1/models"
+                # Use standard host and model headers required by the gateway
+                req_hc = urllib.request.Request(url, headers={
+                    'Authorization': f'Bearer {token}',
+                    'Host': 'afsbox-aigateway.afsbox-system.svc.cluster.local',
+                    'x-model': model_name
+                })
+                # Check health
+                with urllib.request.urlopen(req_hc, timeout=5) as resp_hc:
+                    res_data = json.loads(resp_hc.read().decode('utf-8'))
+                    models = [m.get('id') for m in res_data.get('data', [])]
+                    sys.stderr.write(f'  ✅ Health check passed. Available models: {models}\n')
+                    sys.stderr.flush()
+            except urllib.error.HTTPError as he:
+                if he.code in [502, 503, 504, 404]:
+                    sys.stderr.write(f'  ⏳ Model is still loading (HTTP {he.code})...\n')
+                    sys.stderr.flush()
+                    time.sleep(interval)
+                    continue
+                else:
+                    sys.stderr.write(f'  ⚠️ Health check returned HTTP {he.code}. Assuming ready.\n')
+                    sys.stderr.flush()
+            except urllib.error.URLError as ue:
+                # If network is not reachable (e.g. external environment), skip health check
+                if isinstance(ue.reason, socket.gaierror) or 'connection refused' in str(ue.reason).lower():
+                    sys.stderr.write('  ⚠️ Endpoint is not network-reachable from this host. Skipping health check.\n')
+                    sys.stderr.flush()
+                else:
+                    sys.stderr.write(f'  ⏳ Health check network issue: {ue.reason}. Retrying...\n')
+                    sys.stderr.flush()
+                    time.sleep(interval)
+                    continue
+            except Exception as e_hc:
+                sys.stderr.write(f'  ⚠️ Health check failed with unexpected error: {e_hc}. Assuming ready.\n')
+                sys.stderr.flush()
+
             result = {
                 'internal':   endpoint,
-                'external':   (output.get('externalEndpoint') or {}).get('value', ''),
-                'model_name': (output.get('servedModelName') or {}).get('value', ''),
+                'external':   external_endpoint,
+                'model_name': model_name,
                 'elapsed':    elapsed,
             }
             print(f'READY:{json.dumps(result)}')

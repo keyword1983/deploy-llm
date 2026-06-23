@@ -36,9 +36,10 @@
   - 影響：`poll_download.py` 預設 30 分鐘，Keycloak token 常在中途過期導致 401 無限重試
   - 方案：偵測 HTTP 401 時重新呼叫 `bootstrap_env.py` 取得新 token
 
-- [ ] **F. 部署後健康檢查 (Smoke Test)**
+- [x] **F. 部署後健康檢查 (Smoke Test)**
   - 影響：`poll_serving.py` 只檢查 `internalEndpoint` 有值就標記 READY，但模型可能載入失敗
   - 方案：找到 endpoint 後呼叫 `/v1/models` 確認模型名稱出現，或發一筆 `chat/completions` 測試請求
+  - 狀態：已在 `poll_serving.py` 中整合 `/v1/models` 健康檢查，能智慧處理未就緒時的載入等待，並具備外部網絡無法連接時的自動 fallback 降級機制。
 
 ### P2 — 維護性（建議修）
 
@@ -47,9 +48,10 @@
   - 方案：抽取共用模組 `scripts/auth.py`，兩個腳本 import 共用函數
   - 狀態：已將所有的憑證/K8s 交互登入邏輯統一收攏至 `token_utils.py` 的 `refresh_token()` 函數，原有的重複邏輯全部改為 import 該共用函數。
 
-- [ ] **I. stdout/stderr 分離**
+- [x] **I. stdout/stderr 分離**
   - 影響：progress 行（`phase=Running elapsed=60s`）混在 stdout，AI 解析 JSON 時可能失敗
   - 方案：所有 progress 輸出改用 `file=sys.stderr`
+  - 狀態：已將 `poll_download.py` 與 `poll_serving.py` 的所有進度及診斷輸出全面導向 `sys.stderr`，只將最終的 `READY:JSON` / `FAILED:MSG` 結果輸出於 `stdout`，確保自動化解析正常。
 
 ### P3 — 功能擴充（有空再修）
 
