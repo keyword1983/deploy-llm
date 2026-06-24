@@ -4,7 +4,7 @@
 
 ## 概覽
 
-`deploy-llm` 是一個為 [Google Gemini CLI](https://github.com/google-gemini/gemini-cli) 設計的 Skill，只需使用者說出模型名稱（如「幫我部署 Qwen3 7B」、「我想跑 DeepSeek R1」），Agent 即可全自動完成從環境探索、模型下載到服務上線的完整流程。
+`deploy-llm` 是一個為 ASUS OCIS AFSBOX 平台 設計的 Skill，只需使用者說出模型名稱（如「幫我部署 Qwen3 7B」、「我想跑 DeepSeek R1」），Agent 即可全自動完成從環境探索、模型下載到服務上線的完整流程。
 
 ---
 
