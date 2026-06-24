@@ -1,4 +1,4 @@
----
+﻿---
 name: deploy-llm
 description: 一鍵部署 LLM 模型到 afsbox 平台。當使用者說「我要部署 XXX 模型」、「幫我部署 Gemma/Llama/Qwen/DeepSeek 等模型」、「deploy 某個模型」、「我想跑 XXX」時，自動執行從找 Engine、查 Recipe、下載模型、計算參數到部署並等待就緒的完整流程。
 when_to_use: 使用者提到 any LLM 模型名稱並表達部署、上線、運行意圖時。例如：「我要部署 gemma4 12b」、「幫我跑 llama 3.1 8b」、「部署 Qwen3 7B」、「我想用 DeepSeek R1」。
@@ -156,6 +156,24 @@ python3 scripts/resolve_model.py "{USER_INPUT}"
 
 若 `found=false`，使用 fallback argv 並繼續，在進度中標示 `[no recipe]`。
 
+### 量化格式選擇策略（dtype / quantization rationale）
+
+`find_recipe.py` 回傳的 `has_fp8` / `has_nvfp4` 欄位決定了 `calc_params.py` 最終選用的 `dtype`。以下是各量化方法的選擇邏輯，可在對話中向使用者說明：
+
+| 量化格式 | 壓縮比 | Accuracy Loss | 適用情境 |
+|----------|--------|---------------|----------|
+| **NvFP4** | 4-bit (75%) | <1% | Blackwell (GB10/GB100) 架構專屬；`has_nvfp4=true` 時優先 |
+| **FP8** | 8-bit (50%) | <0.5% | **H100/H800/Blackwell GPU（最快）**；`has_fp8=true` 時優先選用，約 1.8x 速度提升 |
+| **AWQ 4-bit** | 4-bit (75%) | <1% | 70B 以上模型、VRAM 受限環境的生產部署最佳選擇 |
+| **GPTQ 4-bit** | 4-bit (75%) | 1-2% | 廣泛模型相容性需求；非 H100 時優先於 FP8 |
+| **bfloat16** | 16-bit (baseline) | 0% | 預設基準；VRAM 充足且無 Recipe 指定量化時使用 |
+
+> 💡 **決策優先順序**：`nvfp4 > fp8 > awq/gptq > bfloat16`
+> - 若 GPU 為 H100/H800 且 `has_fp8=true`：使用 `--dtype float8_e4m3fn`（約 1.8x 速度提升）
+> - 若 GPU 為 GB10/GB100 且 `has_nvfp4=true`：使用 NvFP4（進一步減少 VRAM）
+> - 若模型 >70B 且需擠入單卡：優先尋找 AWQ 量化版本（4x VRAM 縮減）
+> - 無量化 Recipe 時：保持 `bfloat16` 以獲得最佳精度
+
 **驗證版本相容性**（LLM 推理）：
 若 `ENGINE_VERSION` < `RECIPE_MIN_VERSION`，重新執行 Step 2 腳本並加上 `MIN_VERSION` 參數：
 
@@ -252,6 +270,11 @@ Authorization: Bearer {ACCESS_TOKEN}
 > 在只有 1 張實體 GPU 的單節點/單卡環境中，排程器不支援將同一個容器的複數個虛擬卡分配在同一個實體 GPU 上（會報 `NodeInsufficientDevice`）。因此大模型（如 72B）**不能**選用 `gpu: 4` 的多虛擬卡 Preset，而應選用 `gpu: 1` 但 `sharing.nvidia.com/gpumem` 大顯存配置的 Preset（例如 `auto-preset-nvidia-gb10-1x-large`，配置 80 GiB 顯存）。`calc_params.py` 已對此自動優化，確保只推薦符合實體卡數上限的 Preset。
 
 記錄結果為 `PARAMS`。
+
+> 💡 **進階效能最佳化參數（可加入 `values.command` 或 `values.env`）**：
+> - **`--enable-prefix-caching`**：對具有重複 system prompt 的場景（如 RAG、多輪對話），可將 TTFT 降低最多 83%。若使用場景以重複前置提示為主，建議加入 `values.command`。
+> - **`--enable-chunked-prefill`**：長 prompt 場景（>4096 tokens）可避免因 prefill 阻塞 decode，顯著降低 P99 延遲。
+> - **`VLLM_USE_V1=1`**（環境變數）：啟用 vLLM v1 engine 以獲得更快的 scheduler，可在 `values.env` 中加入 `{"name": "VLLM_USE_V1", "value": "1"}`（適用 vLLM ≥ 0.6.0）。
 
 ```
 [5/6] ✅ 參數計算完成
@@ -509,8 +532,41 @@ curl -s -X POST {internal}/v1/chat/completions \
     ]
     ```
 
-### 2. 確定模型檔案名稱
-GGUF 倉庫通常包含多個檔案或多級目錄，因此必須找出具體的 `.gguf` 檔案路徑：
+### 2. 確定模型檔案名稱與量化版本選擇
+
+GGUF 倉庫通常包含多個量化版本，需先確認要使用哪個檔案。**推薦使用 HuggingFace 提供的 URL 工作流程**：
+
+#### 2a. 透過 HF URL 探索可用的 GGUF 檔案（優先）
+
+```
+# 1. 查看 HF llama.cpp local-app 推薦的量化版本（最準確）
+https://huggingface.co/{HF_REPO}?local-app=llama.cpp
+
+# 2. 透過 Tree API 取得精確的檔案名稱與大小（必做）
+https://huggingface.co/api/models/{HF_REPO}/tree/main?recursive=true
+```
+
+從 Tree API 回應中，篩選 `type=file` 且 `path` 結尾為 `.gguf` 的項目，分類記錄：
+- 主模型檔案（如 `Model-Q4_K_M.gguf`）
+- 多模態投影檔（`mmproj-*.gguf`，需分開處理，不是主模型）
+
+#### 2b. 量化版本選擇指引
+
+根據使用者的 VRAM / RAM 預算選擇合適的量化版本：
+
+| 量化格式 | 適用 VRAM 預算 | 品質 | 適用情境 |
+|----------|---------------|------|----------|
+| **Q8_0** | 充足 | 最高 | VRAM 充足時的首選 |
+| **Q6_K** | 充足 | 極高 | 程式碼/技術任務 |
+| **Q5_K_M** | 中等 | 高 | **程式碼或技術性工作的建議選擇** |
+| **Q4_K_M** | 中等 | 良好 | **通用對話的預設選擇** |
+| **Q3_K_M** | 受限 | 尚可 | 極限省記憶體，僅在 Q4 放不下時考慮 |
+| **IQ4_NL / UD-Q4_K_M** | 中等 | 良好 | 部分倉庫的特殊量化標籤，保留原名 |
+
+> ⚠️ **勿正規化倉庫特有的量化標籤**：若 HF 頁面顯示 `UD-Q4_K_M`，就回報 `UD-Q4_K_M`，不要改成 `Q4_K_M`。
+
+#### 2c. 確認實體路徑
+
 *   在 `ModelRepository` `Ready` 後，透過該 repo 的實體路徑（主機上的 `/var/lib/afsbox/models/{PROJECT_ID}/models/.../latest`）執行 `ls` 列出目錄，找出正確的 GGUF 檔名（例如 `Qwable-27b_Q4_K_M.gguf`）。
 
 ### 3. 模型載入絕對路徑配置 (關鍵)
@@ -597,3 +653,24 @@ python3 scripts/delete_serving.py "{API_BASE_URL}" "{ACCESS_TOKEN}" "{PROJECT_ID
     ```bash
     kubectl rollout restart deployment helm-controller -n flux-system
     ```
+
+#### 3. 多 GPU Tensor Parallel 啟動失敗（NCCL 錯誤）
+*   **症狀**：Pod 日誌出現 `RuntimeError: Distributed init failed` 或 `NCCL error: unhandled cuda error`。
+*   **原因**：多節點 GPU 間的網路通訊設定不正確，或 NCCL 找不到正確的網路介面。
+*   **解決方法**：
+    在 `values.env` 中加入 NCCL 調試環境變數協助診斷：
+    ```json
+    {"name": "NCCL_DEBUG", "value": "INFO"},
+    {"name": "NCCL_SOCKET_IFNAME", "value": "eth0"},
+    {"name": "NCCL_P2P_DISABLE", "value": "1"}
+    ```
+    > 💡 `NCCL_SOCKET_IFNAME` 需換成叢集節點的實際網路介面名稱（可用 `ip addr` 查詢）。確認通訊正常後移除 `NCCL_P2P_DISABLE`。
+
+#### 4. vLLM 推理速度偏慢（低於預期 throughput）
+*   **症狀**：GPU 使用率低於 80%，或 tokens/sec 遠低於預期。
+*   **解決方法**（依序嘗試）：
+    1. **啟用 v1 Engine**：在 `values.env` 加入 `{"name": "VLLM_USE_V1", "value": "1"}`（適用 vLLM ≥ 0.6.0，改進 scheduler 效率）
+    2. **增加並發數**：調高 `--max-num-seqs`（如從 256 → 512）
+    3. **啟用 Prefix Caching**：在 `values.command` 尾端加入 `"--enable-prefix-caching"`（重複 system prompt 場景）
+    4. **H100 環境確認 FP8**：確認 `dtype=float8_e4m3fn`（約 1.8x 速度提升）
+    5. **確認 tensor-parallel-size 為 2 的冪次**：`tp_size=3` 或 `5` 會導致效能異常，應使用 `1/2/4/8`
