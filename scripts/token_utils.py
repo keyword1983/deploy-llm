@@ -60,7 +60,7 @@ def _get_keycloak_ip():
     return None
 
 
-def _get_k8s_secret_data() -> dict | None:
+def _get_k8s_secret_data():
     """Read the K8s afsbox-platform-secret."""
     try:
         proc = subprocess.run(

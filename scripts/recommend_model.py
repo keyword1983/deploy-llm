@@ -18,7 +18,7 @@ import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
 
-def fetch_json(url: str) -> list | dict | None:
+def fetch_json(url: str):
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as resp:

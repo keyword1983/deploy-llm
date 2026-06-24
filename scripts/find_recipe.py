@@ -27,7 +27,7 @@ HF_API_BASE = 'https://huggingface.co/api'
 HF_RESOLVE_BASE = 'https://huggingface.co'
 
 
-def fetch_json(url: str) -> dict | None:
+def fetch_json(url: str):
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'afsbox-deploy/1.0'})
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -36,7 +36,7 @@ def fetch_json(url: str) -> dict | None:
         return None
 
 
-def check_features_from_hf(hf_id: str) -> tuple[bool, bool]:
+def check_features_from_hf(hf_id: str) -> tuple:
     """Check if model supports reasoning and tool calling by analyzing HF configs.
     
     Returns (has_reasoning, has_tools)
@@ -90,7 +90,7 @@ def check_features_from_hf(hf_id: str) -> tuple[bool, bool]:
     return has_reasoning, has_tools
 
 
-def detect_reasoning_parser(hf_id: str) -> str | None:
+def detect_reasoning_parser(hf_id: str):
     hf_id_lower = hf_id.lower()
     if 'deepseek' in hf_id_lower and 'r1' in hf_id_lower:
         return 'deepseek_r1'
@@ -109,7 +109,7 @@ def detect_reasoning_parser(hf_id: str) -> str | None:
     return 'deepseek_r1'
 
 
-def detect_tool_parser(hf_id: str) -> str | None:
+def detect_tool_parser(hf_id: str):
     hf_id_lower = hf_id.lower()
     if 'llama3' in hf_id_lower or 'llama-3' in hf_id_lower:
         return 'llama3_json'
@@ -153,7 +153,7 @@ def build_extra_args(hf_id: str, existing_argv: list) -> list:
     return extra
 
 
-def find_recipe_exact(hf_id: str, recipe_db: list) -> dict | None:
+def find_recipe_exact(hf_id: str, recipe_db: list):
     """Level 1: Exact match in recipe DB"""
     match = next((m for m in recipe_db if m.get('hf_id', '').lower() == hf_id.lower()), None)
     return match
@@ -201,7 +201,7 @@ def get_base_models(hf_id: str) -> list:
     return []
 
 
-def trace_ancestry(hf_id: str, visited: set | None = None) -> list:
+def trace_ancestry(hf_id: str, visited=None) -> list:
     """Recursively trace the full ancestry chain of a model.
     
     Returns ordered list: [immediate_parent, grandparent, ..., root_base]
@@ -243,7 +243,7 @@ def extract_version_token(name: str, family: str) -> str:
     return "" 
 
 
-def find_recipe_by_keywords(hf_id: str, recipe_db: list) -> dict | None:
+def find_recipe_by_keywords(hf_id: str, recipe_db: list):
     """Level 3: Keyword matching in recipe DB with float size parsing and generation mismatch protection"""
     families = ['qwen', 'gemma', 'llama', 'mistral', 'phi', 'yi', 'mixtral', 'deepseek', 'internlm']
     found_family = None
@@ -321,7 +321,7 @@ def infer_from_config(hf_id: str) -> dict:
     }
 
 
-def load_and_process_recipe(match: dict, hardware: str | None, target_hf_id: str) -> dict:
+def load_and_process_recipe(match: dict, hardware, target_hf_id: str) -> dict:
     """Load the full recipe JSON and process it"""
     recipe_path = match.get('json', '')
     recipe_url = f'{RECIPES_BASE}{recipe_path}'
