@@ -76,11 +76,120 @@ def get_arm_ngc_image(version_str_val: str) -> str:
 
 
 def is_engine_arm_compatible(engine: dict) -> bool:
-    """Check if the existing engine image is compatible with ARM64."""
+    """Check if the existing engine image is compatible with ARM64.
+
+    Deprecated: now uses Docker Hub API via image_supports_arm().
+    Kept for backward compat only.
+    """
     image = engine.get("values", {}).get("image", "").lower()
     if not image:
         return True  # Default to compatible if unspecified
     return any(x in image for x in ["nvidia", "arm64", "aarch64"])
+
+
+# -----------------------------------------------------------------------
+# Image architecture detection — query Docker Hub API for real arch data
+# -----------------------------------------------------------------------
+
+_image_arch_cache = {}  # key: (repo, tag) → set of architectures
+
+
+def get_image_architectures(repo: str, tag: str) -> set:
+    """Query Docker Hub API to get supported architectures for a Docker image.
+
+    Returns a set like {'amd64', 'arm64'} or empty set on error.
+    Results are cached in-memory.
+    """
+    cache_key = (repo, tag)
+    if cache_key in _image_arch_cache:
+        return _image_arch_cache[cache_key]
+
+    url = f"https://hub.docker.com/v2/repositories/{repo}/tags/{tag}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "afsbox-deploy/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            manifest = data.get("images", [])
+            archs = {img.get("architecture", "") for img in manifest}
+            _image_arch_cache[cache_key] = archs
+            return archs
+    except Exception:
+        _image_arch_cache[cache_key] = set()
+        return set()
+
+
+def extract_repo_tag(image: str) -> tuple:
+    """Extract (repo, tag) from a full image reference.
+
+    Properly handles registry:port/path:tag format.
+
+    Examples:
+        'vllm/vllm-openai:v0.23.0'                  → ('vllm/vllm-openai', 'v0.23.0')
+        'afsbox-reg...:30443/afsbox/vllm-openai:v0.23.0' → ('vllm/vllm-openai', 'v0.23.0') [Docker Hub mirror]
+        'nvcr.io/nvidia/vllm:26.02-py3'             → ('', '')         [NGC, skip]
+    """
+    # Parse tag: find the last ':' after the last '/'
+    last_slash = image.rfind('/')
+    last_colon = image.rfind(':')
+    if last_colon > last_slash:
+        base = image[:last_colon]
+        tag = image[last_colon + 1:]
+    else:
+        base = image
+        tag = 'latest'
+
+    parts = base.split('/')
+    if len(parts) >= 2 and ('.' in parts[0] or ':' in parts[0]):
+        registry = parts[0]
+        repo = '/'.join(parts[1:])
+        # NVIDIA NGC — private, not queryable
+        if registry.startswith('nvcr.io'):
+            return ("", "")
+        # Map private registry repo names back to Docker Hub
+        if repo.startswith('afsbox/'):
+            name = repo[len('afsbox/'):]
+            docker_hub_map = {'vllm-openai': 'vllm/vllm-openai'}
+            repo = docker_hub_map.get(name, repo)
+        return (repo, tag)
+    elif len(parts) == 2:
+        repo = base
+    elif len(parts) == 1:
+        repo = f"library/{parts[0]}"
+    else:
+        repo = base
+    return (repo, tag)
+
+
+def image_supports_arm(image: str) -> bool:
+    """Check if a Docker image supports arm64 architecture.
+
+    Returns True if:
+      - NVIDIA NGC image (always multi-arch)
+      - Private registry image (assumed compatible, already pulled by k3s)
+      - Docker Hub API confirms arm64 support
+    Returns False if Docker Hub API confirms arm64 is NOT supported.
+    Returns True (opt-in trust) if we cannot query the API.
+    """
+    if "nvcr.io/" in image.lower():
+        return True
+
+    repo, tag = extract_repo_tag(image)
+    if not repo:
+        # Private registry — trust it
+        return True
+
+    archs = get_image_architectures(repo, tag)
+    if not archs:
+        # Could not query — fall back to trust
+        sys.stderr.write(f"  ⚠️ Could not query architecture for {repo}:{tag}, assuming compatible.\n")
+        sys.stderr.flush()
+        return True
+
+    has_arm = "arm64" in archs or "aarch64" in archs
+    sys.stderr.write(f"  ℹ️  Image {repo}:{tag} architectures: {archs}")
+    sys.stderr.write(" ✓ ARM64\n" if has_arm else " ✗ ARM64 NOT supported\n")
+    sys.stderr.flush()
+    return has_arm
 
 
 def parse_version(engine: dict) -> tuple:
@@ -208,7 +317,12 @@ def detect_image_source(engine_id: str, api_base: str, token: str) -> str:
                     
                     vllm_options = [opt for opt in options if "vllm" in opt.lower()]
                     if vllm_options:
+                        # On ARM/Blackwell, prefer images that actually support arm64
                         if is_arm or is_blackwell:
+                            for opt in vllm_options:
+                                if image_supports_arm(opt):
+                                    return opt
+                            # Fallback: prefer nvidia NGC images by name
                             nvidia_opts = [opt for opt in vllm_options if "nvidia" in opt.lower()]
                             if nvidia_opts:
                                 return nvidia_opts[0]
@@ -265,17 +379,27 @@ def try_bootstrap_engine(version_tuple: tuple, chart_name: str, chart_namespace:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if proc.returncode == 0:
             image_path = proc.stdout.strip()
-            parts = image_path.split('/')
-            if len(parts) > 1 and ('.' in parts[0] or ':' in parts[0]):
-                if ":" in image:
-                    base_name = image.split(":")[0].split("/")[-1]
-                    tag_name = image.split(":")[-1]
-                    if "vllm" in base_name:
-                        image = f"{parts[0]}/afsbox/{base_name}:{tag_name}"
-                    else:
-                        image = f"{parts[0]}/nvidia/{base_name}:{tag_name}"
+            ip_parts = image_path.split('/')
+            if len(ip_parts) > 1 and ('.' in ip_parts[0] or ':' in ip_parts[0]):
+                # Parse image ref properly (registry:port/repo:tag)
+                last_slash = image.rfind('/')
+                last_colon = image.rfind(':')
+                if last_colon > last_slash and last_colon > 0:
+                    base_name = image[:last_colon]
+                    tag_name = image[last_colon + 1:]
+                elif ':' in image:
+                    base_name = image.split(':')[0]
+                    tag_name = image.split(':')[-1]
                 else:
-                    image = f"{parts[0]}/afsbox/vllm-openai:latest"
+                    base_name = image
+                    tag_name = 'latest'
+                # Preserve NVIDIA NGC path structure under the private registry
+                if 'nvidia' in base_name.lower():
+                    nvidia_path = '/'.join(base_name.split('/')[-2:]) if '/' in base_name else base_name
+                    image = f"{ip_parts[0]}/{nvidia_path}:{tag_name}"
+                else:
+                    name_only = base_name.split('/')[-1]
+                    image = f"{ip_parts[0]}/afsbox/{name_only}:{tag_name}"
     except Exception:
         pass
 
@@ -440,8 +564,8 @@ def main():
             best_ver = parse_version(eng)
             if best_ver >= min_version:
                 image_tag = detect_image_source(eng['id'], api_base, token)
-                if is_arm and not any(x in image_tag.lower() for x in ["nvidia", "arm64", "aarch64"]):
-                    sys.stderr.write(f"  ⚠️ Skipping engine {eng['id']} because resolved image {image_tag} is not ARM64-compatible.\n")
+                if is_arm and not image_supports_arm(image_tag):
+                    sys.stderr.write(f"  ⚠️ Skipping engine {eng['id']} (image {image_tag} does not support ARM64).\n")
                     sys.stderr.flush()
                     continue
                 compatible_engine = eng
@@ -484,7 +608,7 @@ def main():
                             best_ver = parse_version(eng)
                             if best_ver >= min_version:
                                 image_tag = detect_image_source(eng['id'], api_base, token)
-                                if is_arm and not any(x in image_tag.lower() for x in ["nvidia", "arm64", "aarch64"]):
+                                if is_arm and not image_supports_arm(image_tag):
                                     continue
                                 compatible_engine = eng
                                 break

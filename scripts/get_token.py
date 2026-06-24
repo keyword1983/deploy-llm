@@ -25,14 +25,16 @@ Exit codes:
   1 = token exchange failed (expired / invalid cookie)
   2 = argument or network error
 """
-import sys
-import json
-import urllib.request
-import urllib.error
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
-import subprocess
 import base64
+import json
+import ssl
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+ssl._create_default_https_context = ssl._create_unverified_context
+
 
 
 def get_token_via_k8s():

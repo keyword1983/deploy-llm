@@ -367,7 +367,7 @@ def main():
 
     # Calculate vGPU scale factor if Hami is enabled
     vgpu_scale = 1.0
-    physical_gpus = 1  # Default fallback
+    physical_gpus = 999  # Fallback if physical GPU count cannot be detected
     try:
         import subprocess
         # Detect physical GPUs
